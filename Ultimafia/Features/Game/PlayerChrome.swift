@@ -136,7 +136,8 @@ struct UMAvatarView: View {
 /// Shared by all accounts (keyed by URL only); not cleared on sign-out or account switch.
 final class UMImageCache: @unchecked Sendable {
     static let shared = UMImageCache()
-    private final class Entry { let images: [UMPlatformImage]; let delays: [Double]
+    /// Immutable frames shared by NSCache across threads; nonisolated so the pinning task group can build one.
+    nonisolated private final class Entry { let images: [UMPlatformImage]; let delays: [Double]
         init(_ i: [UMPlatformImage], _ d: [Double]) { images = i; delays = d } }
     private let memory = NSCache<NSURL, Entry>()
     private let session: URLSession = {
