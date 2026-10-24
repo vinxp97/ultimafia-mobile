@@ -266,18 +266,6 @@ private struct GameHeader: View {
                     .accessibilityLabel(session.isReview ? "Back to games" : (session.spectate ? "Stop spectating" : "Return to lobby"))
                 }
             }
-            // Connection dot rides on the circle (the setup name it used to sit beside is gone).
-            .overlay(alignment: .topTrailing) {
-                if !session.isReview {
-                    Circle()
-                        .fill(session.connected ? UMTheme.village : UMTheme.mafia)
-                        .frame(width: 9, height: 9)
-                        .overlay(Circle().stroke(UMTheme.bg, lineWidth: 1.5))
-                        .offset(x: -1, y: 1)
-                        .accessibilityHidden(true)
-                }
-            }
-            .accessibilityValue(session.isReview ? "" : (session.connected ? "Connected" : "Disconnected"))
         }
     }
 
@@ -320,7 +308,7 @@ private struct GameHeader: View {
                         Spacer(minLength: 8)
                     } else {
                         SetupRoleStrip(session: session, inHeader: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .center)
                             .layoutPriority(-1)
                     }
                     statusBadges

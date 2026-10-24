@@ -255,12 +255,16 @@ struct SetupPreviewStrip: View {
     var banishedPerSet: [[SetupRole]] = []
     /// Roleset index owned by the caller (in-game cycling); otherwise the strip cycles locally.
     var currentIndex: Int? = nil
+    /// Game header: no horizontal scrolling. Show as many chips as fit the real width, centred,
+    /// then a glass "…" circle that opens the full role list; no "…" when everything fits.
+    var overflowMenu: Bool = false
 
     @State private var localIndex = 0
     @State private var selected: SetupRole?
     @State private var selectedGroup: RoleGroupSelection?
     @State private var showBanished = false
     @State private var showEvents = false
+    @State private var showAll = false
 
     private var iconSize: CGFloat { compact ? 22 : 24 }
     private var index: Int { currentIndex ?? localIndex }
@@ -345,62 +349,22 @@ struct SetupPreviewStrip: View {
                     .accessibilityLabel("Cycle role sets")
                     .padding(.leading, compact ? 0 : 6)
                 }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: compact ? 6 : 8) {
-                        if grouped {
-                            ForEach(groupItems) { item in
-                                Button {
-                                    if item.label == nil, let only = item.roles.first { selected = only } else { selectedGroup = item }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        if let label = item.label {
-                                            RoleGroupBadge(label: label, size: iconSize, banished: item.banishedOnly)
-                                        } else if let only = item.roles.first {
-                                            RoleIconView(role: only.raw, gameType: gameType, size: iconSize)
-                                        }
-                                        countText(item.size, force: item.label != nil)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(item.label.map { "Role group \($0)\(item.banishedOnly ? ", Banished" : ""), \(item.size) slots" } ?? (item.roles.first?.name ?? ""))
-                            }
-                        } else {
-                            ForEach(roles) { role in
-                                Button {
-                                    selected = role
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        RoleIconView(role: role.raw, gameType: gameType, size: iconSize)
-                                        countText(role.count, force: false)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                            }
+                if overflowMenu {
+                    // Longest prefix that fits, measured by ViewThatFits against the real width.
+                    let all = chips
+                    ViewThatFits(in: .horizontal) {
+                        chipRow(all, ellipsis: false)
+                        ForEach(Array(stride(from: all.count - 1, through: 1, by: -1)), id: \.self) { k in
+                            chipRow(Array(all.prefix(k)), ellipsis: true)
                         }
-                        if !shownEvents.isEmpty {
-                            Button {
-                                showEvents = true
-                            } label: {
-                                poolIcon(RoleArt.eventPoolURL, fallback: "calendar")
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Event pool")
-                        }
-                        if !banished.isEmpty {
-                            Button {
-                                showBanished = true
-                            } label: {
-                                HStack(spacing: 4) {
-                                    poolIcon(RoleArt.banishedPoolURL, fallback: "person.crop.circle.badge.xmark")
-                                    countText(banished.reduce(0) { $0 + $1.count }, force: false)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Banished pool")
-                        }
+                        chipRow([], ellipsis: true)
                     }
-                    .padding(.horizontal, compact ? 0 : 12)
-                    .padding(.vertical, compact ? 2 : 8)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        chipRow(chips, ellipsis: false)
+                            .padding(.horizontal, compact ? 0 : 12)
+                            .padding(.vertical, compact ? 2 : 8)
+                    }
                 }
             }
             .background(compact ? Color.clear : UMTheme.card)
@@ -421,6 +385,126 @@ struct SetupPreviewStrip: View {
             .sheet(isPresented: $showEvents) {
                 RolePoolSheet(title: "Event Pool", gameType: gameType, roles: shownEvents, otherRoles: otherRoles)
             }
+            #if DEBUG
+            // `-UMDiagRolesList`: open the header's "…" list on launch (screenshots).
+            .task {
+                if overflowMenu, ProcessInfo.processInfo.arguments.contains("-UMDiagRolesList") {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    showAll = true
+                }
+            }
+            #endif
+            .sheet(isPresented: $showAll) {
+                SetupRolesListSheet(
+                    gameType: gameType,
+                    sections: allRoleSections,
+                    otherRoles: otherRoles
+                )
+            }
+        }
+    }
+
+    private enum Chip: Hashable, Identifiable {
+        case role(SetupRole), group(RoleGroupSelection), events, banished
+        var id: String {
+            switch self {
+            case .role(let r): return "r:" + r.raw
+            case .group(let g): return "g:\(g.index)"
+            case .events: return "events"
+            case .banished: return "banished"
+            }
+        }
+    }
+
+    private var chips: [Chip] {
+        var out: [Chip] = grouped ? groupItems.map { .group($0) } : roles.map { .role($0) }
+        if !shownEvents.isEmpty { out.append(.events) }
+        if !banished.isEmpty { out.append(.banished) }
+        return out
+    }
+
+    /// Every role in the setup for the "…" list: the shown roleset (or each role group), then the
+    /// event and banished pools, each with its count.
+    private var allRoleSections: [SetupRolesListSheet.Section] {
+        var out: [SetupRolesListSheet.Section] = []
+        if grouped {
+            for item in groupItems {
+                let title = item.label.map { "Group \($0)\(item.banishedOnly ? " · Banished" : "") · \(item.size) \(item.size == 1 ? "slot" : "slots")" }
+                    ?? "\(item.roles.first?.name ?? "Role") · \(item.size) \(item.size == 1 ? "slot" : "slots")"
+                out.append(.init(title: title, roles: item.roles))
+            }
+        } else if !roles.isEmpty {
+            let total = roles.reduce(0) { $0 + $1.count }
+            out.append(.init(title: isSimpleMulti && rolesets.count > 1 ? "Roles · set \(index + 1) of \(rolesets.count) · \(total)" : "Roles · \(total)", roles: roles))
+        }
+        if !shownEvents.isEmpty { out.append(.init(title: "Event Pool", roles: shownEvents)) }
+        if !banished.isEmpty { out.append(.init(title: "Banished Pool", roles: banished)) }
+        return out
+    }
+
+    private func chipRow(_ items: [Chip], ellipsis: Bool) -> some View {
+        HStack(spacing: compact ? 6 : 8) {
+            ForEach(items) { chipView($0) }
+            if ellipsis {
+                Button { showAll = true } label: {
+                    GlassCircleLabel(systemName: "ellipsis", diameter: 30, hitSize: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("All roles")
+                .accessibilityHint("Shows every role in the setup")
+            }
+        }
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func chipView(_ chip: Chip) -> some View {
+        switch chip {
+        case .group(let item):
+            Button {
+                if item.label == nil, let only = item.roles.first { selected = only } else { selectedGroup = item }
+            } label: {
+                HStack(spacing: 4) {
+                    if let label = item.label {
+                        RoleGroupBadge(label: label, size: iconSize, banished: item.banishedOnly)
+                    } else if let only = item.roles.first {
+                        RoleIconView(role: only.raw, gameType: gameType, size: iconSize)
+                    }
+                    countText(item.size, force: item.label != nil)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(item.label.map { "Role group \($0)\(item.banishedOnly ? ", Banished" : ""), \(item.size) slots" } ?? (item.roles.first?.name ?? ""))
+        case .role(let role):
+            Button {
+                selected = role
+            } label: {
+                HStack(spacing: 4) {
+                    RoleIconView(role: role.raw, gameType: gameType, size: iconSize)
+                    countText(role.count, force: false)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(role.count > 1 ? "\(role.name), \(role.count)" : role.name)
+        case .events:
+            Button {
+                showEvents = true
+            } label: {
+                poolIcon(RoleArt.eventPoolURL, fallback: "calendar")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Event pool")
+        case .banished:
+            Button {
+                showBanished = true
+            } label: {
+                HStack(spacing: 4) {
+                    poolIcon(RoleArt.banishedPoolURL, fallback: "person.crop.circle.badge.xmark")
+                    countText(banished.reduce(0) { $0 + $1.count }, force: false)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Banished pool")
         }
     }
 
@@ -522,6 +606,90 @@ struct RolePoolSheet: View {
     }
 }
 
+/// The game header's "…" list: every role in the setup, styled like the Mark-role picker
+/// (RoleGuessPickerSheet): 42 pt icon, name, modifiers, count, elevated rows. Tapping a role opens
+/// its description, the same sheet the strip opens.
+struct SetupRolesListSheet: View {
+    struct Section: Identifiable {
+        var title: String
+        var roles: [SetupRole]
+        var id: String { title }
+    }
+    var gameType: String
+    var sections: [Section]
+    var otherRoles: [String]
+    @State private var selected: SetupRole?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(sections) { section in
+                        Text(section.title)
+                            .font(.caption)
+                            .foregroundStyle(UMTheme.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, section.id == sections.first?.id ? 0 : 8)
+                        ForEach(section.roles) { role in
+                            Button {
+                                selected = role
+                            } label: {
+                                HStack(spacing: 12) {
+                                    RoleIconView(role: role.raw, gameType: gameType, size: 42)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(role.name)
+                                            .font(.body.weight(.semibold))
+                                            .foregroundStyle(.white)
+                                        if !role.modifiers.isEmpty {
+                                            Text(role.modifiers.joined(separator: " / "))
+                                                .font(.caption)
+                                                .foregroundStyle(UMTheme.muted)
+                                        }
+                                    }
+                                    Spacer(minLength: 8)
+                                    if role.count > 1 {
+                                        Text("×\(role.count)")
+                                            .font(.subheadline.weight(.bold).monospacedDigit())
+                                            .foregroundStyle(UMTheme.muted)
+                                    }
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(UMTheme.muted)
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(UMTheme.elevated, in: RoundedRectangle(cornerRadius: 12))
+                                .contentShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(role.count > 1 ? "\(role.name), \(role.count)" : role.name)
+                            .accessibilityHint("Shows the role description")
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .background(UMTheme.bg.ignoresSafeArea())
+            .navigationTitle("Setup roles")
+            .umInlineTitle()
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(item: $selected) { role in
+                RoleDetailsSheet(roleRaw: role.raw, gameType: gameType, otherRoles: otherRoles)
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(UMTheme.card)
+        .preferredColorScheme(.dark)
+        .task { await RoleCatalog.shared.load() }
+    }
+}
+
 struct SetupRoleStrip: View {
     var session: GameSession
     /// In the compact game header: no card background or row padding (the header owns those).
@@ -541,7 +709,8 @@ struct SetupRoleStrip: View {
             grouped: session.setupGrouped,
             groupSizes: session.setupGroupSizes,
             banishedPerSet: session.setupBanishedPerSet,
-            currentIndex: session.setupRolesetIndex
+            currentIndex: session.setupRolesetIndex,
+            overflowMenu: inHeader
         )
     }
 }

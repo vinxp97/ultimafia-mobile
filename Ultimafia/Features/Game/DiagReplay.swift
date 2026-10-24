@@ -55,10 +55,16 @@ struct DiagReplayView: View {
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
             let mode = args[i + 1]
-            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia",
-                                  "roles": [["Villager:": 4, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1,
-                                             "Hooker:": 1, "Mafioso:": 2, "Godfather:": 1, "Serial Killer:": 1]]])
-            if mode == "pregame" {
+            // `overflow`: a 20-player setup with 16 distinct roles, more than the header can fit.
+            let roles: [String: Int] = mode == "overflow"
+                ? ["Villager:": 3, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Hooker:": 1, "Vigilante:": 1,
+                   "Mason:": 2, "Bodyguard:": 1, "Jailer:": 1, "Mayor:": 1, "Mafioso:": 2, "Godfather:": 1,
+                   "Janitor:": 1, "Framer:": 1, "Serial Killer:": 1, "Fool:": 1]
+                : ["Villager:": 4, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1,
+                   "Hooker:": 1, "Mafioso:": 2, "Godfather:": 1, "Serial Killer:": 1]
+            s.debugFeed("setup", ["id": "diag-setup", "name": mode == "overflow" ? "Big Town" : "Guns n Hookers",
+                                  "gameType": "Mafia", "roles": [roles]])
+            if mode == "pregame" || mode == "overflow" {
                 s.debugFeed("timerInfo", ["name": "pregameCountdown", "delay": 154_000])
                 for n in 0..<12 { s.debugFeed("message", msg(n, phase: -1)) }
             } else {
