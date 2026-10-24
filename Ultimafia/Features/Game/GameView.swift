@@ -286,6 +286,14 @@ private struct GameHeader: View {
         if wide { wideBody } else { compactBody }
     }
 
+    /// Clock tap: the current phase's chat to its first message (what the old up-arrow did).
+    private func scrollChatToTop() {
+        #if os(iOS)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        #endif
+        session.chatJumpTopTick &+= 1
+    }
+
     /// Back / leave: a Liquid Glass circle with a chevron. Seated players keep tap = lobby and
     /// press-and-hold = Leave (same confirmation rules as before); everyone else gets tap only.
     @ViewBuilder private var backButton: some View {
@@ -352,7 +360,7 @@ private struct GameHeader: View {
                             .layoutPriority(-1)
                     }
                     statusBadges
-                    PhaseTimerBadge(session: session, glass: true)
+                    PhaseTimerBadge(session: session, glass: true, onTap: scrollChatToTop)
                     if showsGuides, showSetupGuides, session.setupId != nil {
                         SetupGuidesButton(session: session, fillsWidth: false)
                     }
@@ -407,7 +415,7 @@ private struct GameHeader: View {
             } else {
                 Spacer(minLength: 8)
             }
-            PhaseTimerBadge(session: session)
+            PhaseTimerBadge(session: session, onTap: scrollChatToTop)
             if showsGuides, showSetupGuides, session.setupId != nil {
                 SetupGuidesButton(session: session, fillsWidth: false)
             }
@@ -692,22 +700,8 @@ private struct GameChatPane: View {
                 .contentMargins(.top, topInset, for: .scrollContent)
                 .contentMargins(.top, topInset, for: .scrollIndicators)
                 .scrollDismissesKeyboard(.interactively)
-                .overlay(alignment: .top) {
-                    if !transcriptScroll.isAtTop {
-                        Button {
-                            jumpToTop()
-                        } label: {
-                            Image(systemName: "chevron.up")
-                                .font(.body.weight(.bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 32, height: 32)
-                                .background(UMTheme.card.opacity(0.92), in: Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, topInset + 4)
-                        .accessibilityLabel("Scroll to top")
-                    }
-                }
+                // No floating scroll-to-top button: tapping the clock in the header does it
+                // (session.chatJumpTopTick, same as Option+Up).
                 .overlay(alignment: .topTrailing) {
                     if showTypingIndicator, transcriptScroll.isFollowingLatest {
                         VStack(alignment: .trailing, spacing: 6) {
@@ -767,6 +761,12 @@ private struct GameChatPane: View {
                         jumpToLatest()
                     } else {
                         restorePhasePosition(anchor: anchor, phase: newPhase, proxy: proxy)
+                        if forceTop {
+                            // Top right away (not only on the restore retries), so the new phase's
+                            // first frame is already at its first message.
+                            transcriptScroll.requestTop()
+                            DispatchQueue.main.async { transcriptScroll.applyPendingNow() }
+                        }
                     }
                 }
                 .onAppear {
@@ -912,7 +912,7 @@ private struct GameChatPane: View {
         #endif
         var instant = Transaction()
         instant.disablesAnimations = true
-        withTransaction(instant) { session.viewAdjacentPhase(delta: delta) }
+        withTransaction(instant) { session.swipeToAdjacentPhase(delta: delta) }
     }
 
     private func jumpToTop() {

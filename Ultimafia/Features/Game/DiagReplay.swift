@@ -121,12 +121,28 @@ struct DiagReplayView: View {
             } else {
                 for (id, name) in [(0, "Day"), (1, "Night"), (2, "Day")] {
                     s.debugFeed("state", ["id": id, "name": name, "dayCount": id / 2 + 1])
-                    for n in 0..<8 { s.debugFeed("message", msg(n, phase: id)) }
+                    // `-UMDiagLong`: 40 lines a phase, so "top of the phase" is visibly not the end.
+                    let count = args.contains("-UMDiagLong") ? 40 : 8
+                    for n in 0..<count { s.debugFeed("message", msg(n, phase: id)) }
                 }
                 s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
                 if mode == "middle" { s.viewPhase(1) }
             }
             UMDiag.log("replay", "topbar \(mode)")
+            // `-UMDiagClockTap`: what tapping the header clock sends (chat to the top), 5 s in.
+            if args.contains("-UMDiagClockTap") {
+                try? await Task.sleep(for: .seconds(5))
+                s.chatJumpTopTick &+= 1
+                UMDiag.log("replay", "clock tap")
+            }
+            // `-UMDiagIncoming`: one new live message 6 s in (after any diag swipe), to check it
+            // doesn't pull a reader who is at the top down to the end.
+            if args.contains("-UMDiagIncoming") {
+                try? await Task.sleep(for: .seconds(6))
+                s.debugFeed("message", ["id": "late-1", "senderId": "p5", "content": "a new message arrives in the live phase",
+                                        "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"])
+                UMDiag.log("replay", "incoming late-1")
+            }
             return
         }
         if ProcessInfo.processInfo.arguments.contains("-UMDiagHistory") {

@@ -362,7 +362,9 @@ final class GameSession {
     private var typingIn: String?
     /// Set once the draft starts with "/"; no typing indicator is sent until a normal message goes out.
     var typingSuppressed = false
-    /// Review just opened: the chat should start at the top of the first phase, not the end.
+    /// The next phase switch should open the chat at the top of that phase, not at the saved
+    /// position or the end: set when a review opens and by the phase swipe (and its VoiceOver /
+    /// trackpad equivalents). Consumed by the chat's phase-change handler.
     var reviewScrollTopPending = false
     /// Brief inline hint for an invalid slash command (shown above the composer).
     var slashHint: String?
@@ -1034,6 +1036,14 @@ final class GameSession {
         let ids = sortedPhases.map(\.id)
         guard let i = ids.firstIndex(of: viewingPhaseId) else { return false }
         return ids.indices.contains(i + delta)
+    }
+
+    /// Phase swipe: the neighbouring phase, opened at its first message (live phase included;
+    /// following the newest message resumes only once the reader scrolls to the bottom).
+    func swipeToAdjacentPhase(delta: Int) {
+        guard hasAdjacentPhase(delta: delta) else { return }
+        reviewScrollTopPending = true
+        viewAdjacentPhase(delta: delta)
     }
 
     func viewAdjacentPhase(delta: Int) {

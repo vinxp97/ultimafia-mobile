@@ -25,7 +25,7 @@ enum BubbleIndicatorStyle: String, CaseIterable, Identifiable {
         switch self {
         case .bar: return "Default (bar above composer)"
         case .hidden: return "Hidden"
-        case .overlay: return "Overlay under scroll to top"
+        case .overlay: return "Overlay at top of chat"
         }
     }
 }

@@ -280,8 +280,22 @@ struct PhaseTimerBadge: View {
     var session: GameSession
     /// Compact game header: a Liquid Glass capsule, tinted for the warning clocks.
     var glass = false
+    /// Tap the clock: scroll the chat to the top of the phase (game header).
+    var onTap: (() -> Void)? = nil
 
     var body: some View {
+        if let onTap {
+            Button(action: onTap) { clock }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .combine)
+                .accessibilityHint("Scrolls the chat to the top of this phase")
+                .accessibilityAddTraits(.isButton)
+        } else {
+            clock
+        }
+    }
+
+    private var clock: some View {
         TimelineView(.periodic(from: .now, by: 0.2)) { context in
             let kind = session.clockKind
             let text = format(session.clockRemainingMs(at: context.date))
@@ -416,13 +430,13 @@ struct GlassPhaseNavigator: View {
         .accessibilityHint("Choose a phase to view. Swipe the chat sideways to change phase.")
         .accessibilityAdjustableAction { direction in
             switch direction {
-            case .increment: session.viewAdjacentPhase(delta: 1)
-            case .decrement: session.viewAdjacentPhase(delta: -1)
+            case .increment: session.swipeToAdjacentPhase(delta: 1)
+            case .decrement: session.swipeToAdjacentPhase(delta: -1)
             @unknown default: break
             }
         }
-        .accessibilityAction(named: "Previous phase") { session.viewAdjacentPhase(delta: -1) }
-        .accessibilityAction(named: "Next phase") { session.viewAdjacentPhase(delta: 1) }
+        .accessibilityAction(named: "Previous phase") { session.swipeToAdjacentPhase(delta: -1) }
+        .accessibilityAction(named: "Next phase") { session.swipeToAdjacentPhase(delta: 1) }
         .frame(maxWidth: .infinity)
     }
 }
