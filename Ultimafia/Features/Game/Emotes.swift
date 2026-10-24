@@ -175,7 +175,8 @@ enum UMSiteEmote {
     }
 }
 
-enum UMMediaURL {
+/// Pure string -> URL (UMConfig is nonisolated), so callable from any isolation (image pinning tasks).
+nonisolated enum UMMediaURL {
     static func resolve(_ path: String) -> URL? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }

@@ -20,22 +20,25 @@ final class UMTerminology {
     @ObservationIgnored private var refreshing = false
 
     static let sourceURL = URL(string: "https://raw.githubusercontent.com/UltiMafia/Ultimafia/master/react_main/src/constants/slangList.js")!
-    static var cacheFile: URL { UMCacheLocation.root.appendingPathComponent("terminology.json") }
+    nonisolated static var cacheFile: URL { UMCacheLocation.root.appendingPathComponent("terminology.json") }
     /// Web's conjugation handling (lib/slangMatch.js) for single words.
     private static let suffixes = ["ing", "ed", "es", "s"]
 
     /// Cached copy (else bundled) right away; network refresh when there's no cached copy yet.
+    /// Disk reads and JSON decoding run off the main actor (they used to run during launch).
     func load() async {
-        if !loaded {
-            loaded = true
-            if let data = try? Data(contentsOf: Self.cacheFile), let dict = Self.decode(data) {
-                apply(dict)
-            } else if let url = Bundle.main.url(forResource: "UMTerminology", withExtension: "json"),
-                      let data = try? Data(contentsOf: url), let dict = Self.decode(data) {
-                apply(dict)
-            }
-        }
-        if !FileManager.default.fileExists(atPath: Self.cacheFile.path) { await refresh() }
+        let first = !loaded
+        loaded = true
+        let (stored, hasCache) = await Task.detached(priority: .utility) { () -> ([String: String]?, Bool) in
+            let hasCache = FileManager.default.fileExists(atPath: Self.cacheFile.path)
+            guard first else { return (nil, hasCache) }
+            if let data = try? Data(contentsOf: Self.cacheFile), let dict = Self.decode(data) { return (dict, hasCache) }
+            if let url = Bundle.main.url(forResource: "UMTerminology", withExtension: "json"),
+               let data = try? Data(contentsOf: url), let dict = Self.decode(data) { return (dict, hasCache) }
+            return (nil, hasCache)
+        }.value
+        if let stored { apply(stored) }
+        if !hasCache { await refresh() }
     }
 
     /// Called after Clear Cached Media: drop the file and download again.
@@ -53,9 +56,11 @@ final class UMTerminology {
               let js = String(data: data, encoding: .utf8) else { return }
         let dict = Self.parse(js)
         guard dict.count >= 50 else { return }  // parse failed or format changed: keep what we have
-        if let json = try? JSONSerialization.data(withJSONObject: dict.mapValues { ["definition": $0] }) {
-            try? json.write(to: Self.cacheFile, options: .atomic)
-        }
+        await Task.detached(priority: .utility) {
+            if let json = try? JSONSerialization.data(withJSONObject: dict.mapValues { ["definition": $0] }) {
+                try? json.write(to: Self.cacheFile, options: .atomic)
+            }
+        }.value
         apply(dict)
     }
 
@@ -67,7 +72,7 @@ final class UMTerminology {
         version &+= 1
     }
 
-    private static func decode(_ data: Data) -> [String: String]? {
+    nonisolated private static func decode(_ data: Data) -> [String: String]? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         var out: [String: String] = [:]
         for (k, v) in obj {

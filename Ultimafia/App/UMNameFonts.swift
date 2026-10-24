@@ -10,7 +10,7 @@ final class UMNameFonts {
     static let shared = UMNameFonts()
 
     /// nameFont key -> CSS font-family declared by the site.
-    private static let webFamilies: [String: String] = [
+    nonisolated private static let webFamilies: [String: String] = [
         "slab": "RobotoSlab", "mono": "RobotoMono", "poppins": "Poppins",
         "bettynoir": "BettyNoir", "autophobia": "Autophobia", "spooky": "Spooky", "nabla": "Nabla",
     ]
@@ -23,10 +23,6 @@ final class UMNameFonts {
     private(set) var registered: [String: String] = [:]
     @ObservationIgnored private var started = false
 
-    private var cacheDir: URL {
-        UMCacheLocation.nameFonts
-    }
-
     func loadIfNeeded() {
         guard !started else { return }
         started = true
@@ -38,49 +34,67 @@ final class UMNameFonts {
         return registered[k] ?? Self.systemFamilies[k]
     }
 
+    /// File reads, temp-file writes and CoreText registration run off the main actor (they used to
+    /// block launch: Xcode's "Performing I/O on the main thread can cause slow launches").
+    /// Only the `registered` map is updated here, on the main actor.
     private func load() async {
+        let families = Self.webFamilies
         // Bundled copies (Fonts/<CSS family>.ttf) are the primary source.
-        for (key, family) in Self.webFamilies {
-            if let url = Bundle.main.url(forResource: family, withExtension: "ttf")
-                ?? Bundle.main.url(forResource: family, withExtension: "ttf", subdirectory: "Fonts"),
-               let data = try? Data(contentsOf: url) { register(data, key: key) }
-        }
-        guard registered.count < Self.webFamilies.count else { return }
+        let bundled = await Task.detached(priority: .utility) { () -> [String: String] in
+            var out: [String: String] = [:]
+            for (key, family) in families {
+                if let url = Bundle.main.url(forResource: family, withExtension: "ttf")
+                    ?? Bundle.main.url(forResource: family, withExtension: "ttf", subdirectory: "Fonts"),
+                   let data = try? Data(contentsOf: url), let ps = Self.register(data) { out[key] = ps }
+            }
+            return out
+        }.value
+        registered.merge(bundled) { _, new in new }
+        guard registered.count < families.count else { return }
         // Fallback for any bundled face that is missing: disk cache, then the live site.
         // Cached files first so names render correctly offline / before the network returns.
-        var cachedByFamily: [String: URL] = [:]
-        if let files = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
-            for f in files { cachedByFamily[f.deletingPathExtension().lastPathComponent] = f }
-        }
-        for (key, family) in Self.webFamilies where registered[key] == nil {
-            if let file = cachedByFamily[family], let data = try? Data(contentsOf: file) { register(data, key: key) }
-        }
-        guard let urls = try? await fetchFontFaceURLs() else { return }
-        for (key, family) in Self.webFamilies where registered[key] == nil {
+        let missing = families.filter { registered[$0.key] == nil }
+        let cached = await Task.detached(priority: .utility) { () -> [String: String] in
+            var byFamily: [String: URL] = [:]
+            if let files = try? FileManager.default.contentsOfDirectory(at: UMCacheLocation.nameFonts, includingPropertiesForKeys: nil) {
+                for f in files { byFamily[f.deletingPathExtension().lastPathComponent] = f }
+            }
+            var out: [String: String] = [:]
+            for (key, family) in missing {
+                if let file = byFamily[family], let data = try? Data(contentsOf: file), let ps = Self.register(data) { out[key] = ps }
+            }
+            return out
+        }.value
+        registered.merge(cached) { _, new in new }
+        guard registered.count < families.count, let urls = try? await fetchFontFaceURLs() else { return }
+        for (key, family) in families where registered[key] == nil {
             guard let url = urls[family],
                   let (data, resp) = try? await URLSession.shared.data(for: UMAccess.request(url)),
                   (resp as? HTTPURLResponse)?.statusCode == 200 else { continue }
-            if register(data, key: key) {
-                try? data.write(to: cacheDir.appendingPathComponent(family + ".ttf"), options: .atomic)
-            }
+            let ps = await Task.detached(priority: .utility) { () -> String? in
+                guard let ps = Self.register(data) else { return nil }
+                try? data.write(to: UMCacheLocation.nameFonts.appendingPathComponent(family + ".ttf"), options: .atomic)
+                return ps
+            }.value
+            if let ps { registered[key] = ps }
         }
     }
 
-    @discardableResult
-    private func register(_ data: Data, key: String) -> Bool {
+    /// Registers one face process-wide; returns its PostScript name. Thread-safe (CoreText).
+    nonisolated private static func register(_ data: Data) -> String? {
         guard let provider = CGDataProvider(data: data as CFData),
               let cgFont = CGFont(provider),
-              let ps = cgFont.postScriptName as String? else { return false }
+              let ps = cgFont.postScriptName as String? else { return nil }
         // Register from a file URL (CTFontManagerRegisterGraphicsFont is deprecated in iOS 18).
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("umfont-\(ps)").appendingPathExtension("ttf")
-        guard (try? data.write(to: fileURL, options: .atomic)) != nil else { return false }
+        guard (try? data.write(to: fileURL, options: .atomic)) != nil else { return nil }
         if !CTFontManagerRegisterFontsForURL(fileURL as CFURL, .process, nil) {
             // Already registered (e.g. second load) is fine; anything else is a bad file.
-            guard UIFont(name: ps, size: 12) != nil else { return false }
+            let font = CTFontCreateWithName(ps as CFString, 12, nil)
+            guard CTFontCopyPostScriptName(font) as String == ps else { return nil }
         }
-        registered[key] = ps
-        return true
+        return ps
     }
 
     /// Reads the site's stylesheets and returns CSS family -> absolute font URL.
