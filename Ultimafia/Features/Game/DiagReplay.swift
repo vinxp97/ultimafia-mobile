@@ -129,6 +129,32 @@ struct DiagReplayView: View {
                 if mode == "middle" { s.viewPhase(1) }
             }
             UMDiag.log("replay", "topbar \(mode)")
+            // `-UMDiagGunshot [late|hidden]`: a Day gunshot 3 s in, sent the way the server does
+            // (gunshot, alert, death, reveal, instant obituaries). `late`: the obituary carries no
+            // reveal and the `reveal` event comes 2 s after the paper; `hidden`: no reveal at all;
+            // `eventonly`: see below.
+            if let i = args.firstIndex(of: "-UMDiagGunshot") {
+                let variant = args.indices.contains(i + 1) ? args[i + 1] : "normal"
+                try? await Task.sleep(for: .seconds(3))
+                let now = Date().timeIntervalSince1970 * 1000
+                s.debugFeed("gunshot", nil)
+                s.debugFeed("message", ["id": "gun-alert", "senderId": "server", "content": ":gun: Player2 pulls a gun and shoots at Player4!",
+                                        "time": now, "meetingId": "village"])
+                s.debugFeed("death", "p4")
+                // `eventonly`: the reveal broadcast arrives (in server order) but the obituary has no revealMessage.
+                if variant == "normal" || variant == "eventonly" { s.debugFeed("reveal", ["playerId": "p4", "role": "Cop"]) }
+                var snippets: [String: Any] = ["deathMessage": "Player4 was shot."]
+                if variant == "normal" { snippets["revealMessage"] = "Player4's role is Cop." }
+                s.debugFeed("obituaries", ["id": "2:instant-\(Int(now))", "source": "instant-\(Int(now))", "dayCount": 1, "time": now,
+                                           "obituaries": [["id": "p4", "playerInfo": ["id": "p4", "name": "Player4", "avatar": false],
+                                                           "snippets": snippets]]])
+                UMDiag.log("replay", "gunshot \(variant)")
+                if variant == "late" {
+                    try? await Task.sleep(for: .seconds(2))
+                    s.debugFeed("reveal", ["playerId": "p4", "role": "Cop"])
+                    UMDiag.log("replay", "late reveal")
+                }
+            }
             // `-UMDiagClockTap`: what tapping the header clock sends (chat to the top), 5 s in.
             if args.contains("-UMDiagClockTap") {
                 try? await Task.sleep(for: .seconds(5))

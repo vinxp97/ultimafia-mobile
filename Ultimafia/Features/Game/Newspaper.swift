@@ -2,12 +2,16 @@ import SwiftUI
 
 struct NewspaperDeath: Identifiable, Hashable {
     var id: String
+    /// In-game player id (for matching a later death reveal).
+    var playerId: String? = nil
     var name: String
     var userId: String?
     var avatar: Bool
     var deathMessage: String
     var revealLine: String?
     var revealRoleRaw: String? = nil
+    /// "[Mafia-Aligned]" and the like, shown after the role (not part of the role name).
+    var revealSuffix: String? = nil
     var lastWill: String?
 }
 
@@ -74,18 +78,43 @@ enum NewspaperCopy {
         return "\(group) Wins!"
     }
 
-    static func reveal(from raw: String?, playerName: String) -> (line: String, roleRaw: String?)? {
+    static func reveal(from raw: String?, playerName: String) -> (line: String, roleRaw: String?, suffix: String?)? {
         guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
         if let role = extract(text, marker: "'s role is ") {
             guard isExposed(role) else { return nil }
-            let raw = normalizeRole(role)
-            return ("\(playerName)'s role was: \(reformatRole(raw)).", raw)
+            let (body, suffix) = splitAlignedSuffix(role)
+            let raw = normalizeRole(body)
+            return ("\(playerName)'s role was: \(reformatRole(raw))\(suffix.map { " \($0)" } ?? "").", raw, suffix)
         }
         if let alignment = extract(text, marker: "'s alignment is ") {
             guard isExposed(alignment) else { return nil }
-            return ("\(playerName)'s alignment was: \(prettyAlignment(alignment))", nil)
+            return ("\(playerName)'s alignment was: \(prettyAlignment(alignment))", nil, nil)
         }
         return nil
+    }
+
+    /// From a `reveal` broadcast's role ("Cop:Insane", or an alignment in alignment-only setups).
+    static func reveal(fromRole role: String, playerName: String) -> (line: String, roleRaw: String?, suffix: String?)? {
+        let r = role.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isExposed(r) else { return nil }
+        if alignments.contains(r) {
+            return ("\(playerName)'s alignment was: \(prettyAlignment(r))", nil, nil)
+        }
+        let (body, suffix) = splitAlignedSuffix(r)
+        let raw = normalizeRole(body)
+        return ("\(playerName)'s role was: \(reformatRole(raw))\(suffix.map { " \($0)" } ?? "").", raw, suffix)
+    }
+
+    private static let alignments: Set<String> = ["Village", "Town", "Mafia", "Cult", "Independent", "Event",
+                                                 "Resistance", "Spies", "Host", "Liberals", "Fascists", "Liars", "Army"]
+
+    /// Mafia death reveals of a converted player read "Cop [Mafia-Aligned]".
+    static func splitAlignedSuffix(_ role: String) -> (String, String?) {
+        let t = role.trimmingCharacters(in: .whitespaces)
+        guard t.hasSuffix("]"), let open = t.lastIndex(of: "[") else { return (t, nil) }
+        let body = t[..<open].trimmingCharacters(in: .whitespaces)
+        guard !body.isEmpty else { return (t, nil) }
+        return (body, String(t[open...]))
     }
 
     private static func extract(_ text: String, marker: String) -> String? {
@@ -234,6 +263,11 @@ struct NewspaperCard: View {
                         gameType: session.setupGameType,
                         otherRoles: session.guessableRoles.map(\.raw)
                     )
+                    if let suffix = death.revealSuffix {
+                        Text(suffix)
+                            .font(.system(.callout, design: .serif))
+                            .foregroundStyle(paperInk)
+                    }
                 }
             } else if let reveal = death.revealLine {
                 EmoteText(

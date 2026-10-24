@@ -347,6 +347,18 @@ final class GameSession {
         setupRoles = setupRolesets[setupRolesetIndex]
     }
     var newspapers: [Int: [String: NewspaperIssue]] = [:]
+    /// Roles the server announced for a player after their death (the public death reveal:
+    /// `death`, then the `reveal` broadcast, then `obituaries`; in history, a role that first
+    /// appears in the state where the player died). Fills a paper whose obituary came without
+    /// a revealMessage, now or when the reveal arrives later. Private reveals (teammates, your
+    /// own role) happen while alive and never land here.
+    private(set) var deathRevealedRoles: [String: String] = [:]
+
+    /// The paper as it is now (a chat line holds the paper from when it arrived; reveals that
+    /// come later are merged into `newspapers`).
+    func currentIssue(_ issue: NewspaperIssue) -> NewspaperIssue {
+        newspapers[issue.phaseId]?[issue.source] ?? issue
+    }
     private var newspaperEpoch: Date?
     private var newspaperEpochDayCount: Int?
 
@@ -1427,7 +1439,16 @@ final class GameSession {
             if let ld = LDState(state["extraInfo"]) { ldByPhase[phaseId] = ld }
             applyDeadMap(state["dead"])
             deadByPhase[phaseId] = Self.deadSet(state["dead"])
+            let rolesBefore = knownRoles
             applyKnownRolesMap(state["roles"])
+            let deadNow = Self.deadSet(state["dead"])
+            if let roles = state["roles"] as? [String: Any] {
+                for (pid, val) in roles {
+                    guard let role = val as? String, !role.isEmpty, deadNow.contains(pid),
+                          rolesBefore[pid] != role else { continue }
+                    deathRevealedRoles[pid] = role
+                }
+            }
             if key == keys.last {
                 currentPhaseId = phaseId
                 viewingPhaseId = phaseId
@@ -1502,6 +1523,35 @@ final class GameSession {
         messages.sort { $0.time < $1.time }
         adoptKnownRolesForSelf()
         persistRoleMarks()
+        fillPaperReveals()
+    }
+
+    /// Papers whose obituary had no reveal take the role (or alignment) the server broadcast for
+    /// that player at their death. Never invents one: no death reveal, nothing shown.
+    private func fillPaperReveals() {
+        guard !deathRevealedRoles.isEmpty else { return }
+        for (phase, bag) in newspapers {
+            var updated = bag
+            var changed = false
+            for (source, issue) in bag {
+                var paper = issue
+                for i in paper.deaths.indices {
+                    let d = paper.deaths[i]
+                    guard d.revealRoleRaw == nil, d.revealLine == nil else { continue }
+                    let pid = d.playerId
+                        ?? players.first(where: { $0.name == d.name })?.id
+                        ?? players.first(where: { $0.userId != nil && $0.userId == d.userId })?.id
+                    guard let pid, let role = deathRevealedRoles[pid],
+                          let reveal = NewspaperCopy.reveal(fromRole: role, playerName: d.name) else { continue }
+                    paper.deaths[i].revealLine = reveal.line
+                    paper.deaths[i].revealRoleRaw = reveal.roleRaw
+                    paper.deaths[i].revealSuffix = reveal.suffix
+                    changed = true
+                }
+                updated[source] = paper
+            }
+            if changed { newspapers[phase] = updated }
+        }
     }
 
     /// Fired for each live chat message that pings this player (see `mentionsSelf`).
@@ -2214,6 +2264,11 @@ final class GameSession {
         guard let playerId = obj["playerId"] as? String else { return }
         let role = obj["role"] as? String
         if let role { knownRoles[playerId] = role }
+        // `death` comes before the death reveal, so a reveal for a dead player is that reveal.
+        if let role, !role.isEmpty, deadIds.contains(playerId), !ingestingHistory {
+            deathRevealedRoles[playerId] = role
+            fillPaperReveals()
+        }
         if playerId == selfId {
             if selfRoleName == nil, let role {
                 selfRoleName = role.split(separator: ":").first.map(String.init)
@@ -2505,12 +2560,14 @@ final class GameSession {
             let reveal = NewspaperCopy.reveal(from: revealRaw, playerName: name)
             deaths.append(NewspaperDeath(
                 id: id,
+                playerId: matched?.id ?? (info["id"] as? String) ?? (ob["id"] as? String),
                 name: name,
                 userId: matched?.userId ?? userId,
                 avatar: matched?.avatar ?? boolValue(info["avatar"]),
                 deathMessage: deathMessage,
                 revealLine: reveal?.line,
                 revealRoleRaw: reveal?.roleRaw,
+                revealSuffix: reveal?.suffix,
                 lastWill: will
             ))
         }
@@ -2530,6 +2587,7 @@ final class GameSession {
         var bag = newspapers[pid] ?? [:]
         bag[issue.source] = issue
         newspapers[pid] = bag
+        if !ingestingHistory { fillPaperReveals() }
         if issue.source.hasPrefix("instant") {
             let line = newspaperChatLine(for: issue)
             if ingestingHistory { return line }

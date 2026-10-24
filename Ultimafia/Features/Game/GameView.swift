@@ -1447,7 +1447,8 @@ private struct ChatRow: View {
         let player = session.player(for: line.senderId)
         Group {
             if let paper = line.newspaper {
-                NewspaperCard(issue: paper, session: session)
+                // Live copy: a death reveal that arrives after the paper updates it in place.
+                NewspaperCard(issue: session.currentIssue(paper), session: session)
             } else if line.senderId == "vote" {
                 voteRow
             } else if line.isServer {
