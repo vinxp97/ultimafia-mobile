@@ -558,6 +558,9 @@ private struct GameChatPane: View {
     /// True while a phase switch restores its position; tracking and auto-follow stand down.
     @State private var restoringScroll = false
     @State private var restoreGeneration = UUID()
+    /// Horizontal offset of the transcript while a phase swipe follows the finger.
+    @State private var swipeOffset: CGFloat = 0
+    @State private var paneWidth: CGFloat = 390
 
     private var chatLines: [ChatLine] {
         session.displayedMessages.filter { showVotingLog || !$0.isVoteLog }
@@ -638,13 +641,39 @@ private struct GameChatPane: View {
                     .background {
                         UMTranscriptScrollBridge(controller: transcriptScroll)
                     }
+                    #if os(iOS)
+                    .background {
+                        UMPhaseSwipeBridge(enabled: !session.isLiarsDice,
+                                           onChange: swipeChanged, onEnd: swipeEnded)
+                    }
+                    #endif
                     .padding(.horizontal, 12)
                     .padding(.top, 12)
                     // The last line sits close under the floating composer: the composer's own height
                     // is already reserved by the scroll content margin, so this is only the room
                     // between the two.
                     .padding(.bottom, 12)
+                    .offset(x: swipeOffset)
+                    .opacity(1 - min(0.45, abs(swipeOffset) / max(paneWidth, 1) * 0.6))
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
+                #if DEBUG
+                // `-UMDiagSwipe <dx>`: hold the transcript mid-swipe (screenshots);
+                // `-UMDiagSwipeRelease <dx>`: drag to dx and let go, through the real handlers.
+                .task {
+                    let args = ProcessInfo.processInfo.arguments
+                    for flag in ["-UMDiagSwipe", "-UMDiagSwipeRelease"] {
+                        guard let i = args.firstIndex(of: flag), args.indices.contains(i + 1),
+                              let dx = Double(args[i + 1]) else { continue }
+                        try? await Task.sleep(for: .seconds(3))
+                        for step in 1...10 {
+                            swipeChanged(CGFloat(dx) * CGFloat(step) / 10)
+                            try? await Task.sleep(for: .milliseconds(16))
+                        }
+                        if flag == "-UMDiagSwipeRelease" { swipeEnded(CGFloat(dx), 0) }
+                    }
+                }
+                #endif
                 .pointerScrolling()
                 .contentMargins(.bottom, composerOverlayHeight, for: .scrollContent)
                 .contentMargins(.top, topInset, for: .scrollContent)
@@ -841,6 +870,43 @@ private struct GameChatPane: View {
         // as that has happened rather than leaving it to the next display-link tick, which is late
         // enough for the row to be drawn behind the composer for one frame.
         DispatchQueue.main.async { transcriptScroll.applyPendingNow() }
+    }
+
+    // MARK: Phase swipe
+    // Left to right = previous phase, right to left = next, like paging. The transcript follows the
+    // finger 1:1 when there is a phase that way and rubber-bands (a fifth of the drag, capped)
+    // when there isn't. Releasing past ~28% of the width, or flicking, commits: the old phase slides
+    // off, a light haptic, the new one springs in from the other side. Anything else springs back.
+
+    private func swipeChanged(_ dx: CGFloat) {
+        let possible = session.hasAdjacentPhase(delta: dx > 0 ? -1 : 1)
+        swipeOffset = possible ? dx : (dx > 0 ? 1 : -1) * min(abs(dx) * 0.2, 56)
+    }
+
+    private func swipeEnded(_ dx: CGFloat, _ vx: CGFloat) {
+        let delta = dx > 0 ? -1 : 1
+        let possible = dx != 0 && session.hasAdjacentPhase(delta: delta)
+        let far = abs(dx) > paneWidth * 0.28
+        let flick = abs(vx) > 600 && abs(dx) > 36 && (vx > 0) == (dx > 0)
+        let reversing = abs(vx) > 300 && (vx > 0) != (dx > 0)
+        guard possible, far || flick, !reversing else {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { swipeOffset = 0 }
+            return
+        }
+        let out = dx > 0 ? paneWidth : -paneWidth
+        withAnimation(.easeIn(duration: 0.12)) { swipeOffset = out }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            #if os(iOS)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            #endif
+            session.viewAdjacentPhase(delta: delta)
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant) { swipeOffset = -out * 0.4 }
+            DispatchQueue.main.async {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { swipeOffset = 0 }
+            }
+        }
     }
 
     private func jumpToTop() {

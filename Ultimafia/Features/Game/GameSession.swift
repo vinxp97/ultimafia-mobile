@@ -1003,6 +1003,13 @@ final class GameSession {
         publishVisibleTypers()
     }
 
+    /// Whether there is a phase `delta` steps from the one being viewed (swipe / arrows / a11y).
+    func hasAdjacentPhase(delta: Int) -> Bool {
+        let ids = sortedPhases.map(\.id)
+        guard let i = ids.firstIndex(of: viewingPhaseId) else { return false }
+        return ids.indices.contains(i + delta)
+    }
+
     func viewAdjacentPhase(delta: Int) {
         let ids = sortedPhases.map(\.id)
         guard let i = ids.firstIndex(of: viewingPhaseId) else { return }

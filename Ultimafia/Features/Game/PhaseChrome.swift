@@ -371,70 +371,58 @@ struct GlassCircleLabel: View {
 struct GlassPhaseNavigator: View {
     var session: GameSession
 
+    /// Phase capsule only: tap opens the jump-to-phase menu; previous / next is a sideways swipe on
+    /// the chat (UMPhaseSwipeBridge), and VoiceOver gets adjustable + named actions for both.
     var body: some View {
         let phases = session.sortedPhases
         let index = phases.firstIndex { $0.id == session.viewingPhaseId }
         let current = index.map { phases[$0] } ?? phases.last
-        let hasPrev = (index ?? 0) > 0
-        let hasNext = index.map { $0 < phases.count - 1 } ?? false
-        HStack(spacing: 6) {
-            arrow("chevron.left", label: "Previous phase", target: hasPrev ? phases[index! - 1] : nil, delta: -1)
-            Menu {
-                ForEach(phases) { phase in
-                    Button {
-                        session.viewPhase(phase.id)
-                    } label: {
-                        Label(PhaseBar.shortLabel(phase) + (phase.id == session.currentPhaseId ? " (now)" : ""),
-                              systemImage: PhaseBar.icon(for: phase.name))
-                    }
+        Menu {
+            ForEach(phases) { phase in
+                Button {
+                    session.viewPhase(phase.id)
+                } label: {
+                    Label(PhaseBar.shortLabel(phase) + (phase.id == session.currentPhaseId ? " (now)" : ""),
+                          systemImage: PhaseBar.icon(for: phase.name))
                 }
-            } label: {
-                HStack(spacing: 6) {
-                    if let current {
-                        Image(systemName: PhaseBar.icon(for: current.name))
-                            .foregroundStyle(session.isViewingLive ? UMTheme.blood : UMTheme.muted)
-                        Text(PhaseBar.shortLabel(current))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                    }
-                    if !session.isViewingLive {
-                        Text("past")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(UMTheme.muted)
-                    }
-                }
-                .font(.subheadline.weight(.semibold))
-                .padding(.horizontal, 16)
-                .frame(minWidth: 96, minHeight: 36)
-                .glassEffect(.regular.interactive(), in: .capsule)
-                .frame(minHeight: 44)
-                .contentShape(Capsule())
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .accessibilityLabel("Phase")
-            .accessibilityValue(current.map { PhaseBar.shortLabel($0) + (session.isViewingLive ? "" : ", past phase") } ?? "")
-            .accessibilityHint("Choose a phase to view")
-            arrow("chevron.right", label: "Next phase", target: hasNext ? phases[index! + 1] : nil, delta: 1)
+        } label: {
+            HStack(spacing: 6) {
+                if let current {
+                    Image(systemName: PhaseBar.icon(for: current.name))
+                        .foregroundStyle(session.isViewingLive ? UMTheme.blood : UMTheme.muted)
+                    Text(PhaseBar.shortLabel(current))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                if !session.isViewingLive {
+                    Text("past")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(UMTheme.muted)
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .frame(minWidth: 96, minHeight: 36)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
         }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .accessibilityLabel("Phase")
+        .accessibilityValue(current.map { PhaseBar.shortLabel($0) + (session.isViewingLive ? "" : ", past phase") } ?? "")
+        .accessibilityHint("Choose a phase to view. Swipe the chat sideways to change phase.")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: session.viewAdjacentPhase(delta: 1)
+            case .decrement: session.viewAdjacentPhase(delta: -1)
+            @unknown default: break
+            }
+        }
+        .accessibilityAction(named: "Previous phase") { session.viewAdjacentPhase(delta: -1) }
+        .accessibilityAction(named: "Next phase") { session.viewAdjacentPhase(delta: 1) }
         .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private func arrow(_ symbol: String, label: String, target: GamePhase?, delta: Int) -> some View {
-        if let target {
-            Button {
-                session.viewAdjacentPhase(delta: delta)
-            } label: {
-                GlassCircleLabel(systemName: symbol, diameter: 34)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(label)
-            .accessibilityValue(PhaseBar.shortLabel(target))
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-        } else {
-            Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
-        }
     }
 }
