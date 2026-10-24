@@ -22,7 +22,10 @@ final class AppModel {
     var finishedGames: [GameSummary] = []
     var finishedHasMore = true
     /// Finished-game replay. Kept apart from `game` so it never counts as seated.
-    var reviewSession: GameSession?
+    /// Closing a review drops its in-memory game and its pinned images (UMImageCache).
+    var reviewSession: GameSession? {
+        didSet { if let old = oldValue, old !== reviewSession { UMImageCache.shared.unpin(scope: old.assetScope) } }
+    }
     /// Pings received while seated but away from the game screen; shown on the Game tab.
     var mentionCount = 0
     /// Live game screen actually on screen (set by GameView appear/disappear, covers tab switches).
@@ -33,7 +36,10 @@ final class AppModel {
     var path: [Route] = []
     /// The Game section's own stack: the live game and anything pushed from it.
     var gamePath: [Route] = []
-    var game: GameSession?
+    /// Leaving / detaching / a new game drops the old session's pinned images.
+    var game: GameSession? {
+        didSet { if let old = oldValue, old !== game { UMImageCache.shared.unpin(scope: old.assetScope) } }
+    }
     /// Bumped whenever the user returns to the Lobby; LobbyView scrolls to the top on change.
     var lobbyScrollToTop = 0
     /// The signed-in user's own custom emotes/stickers (`:name:` -> media path), loaded once per session.

@@ -149,14 +149,86 @@ final class UMImageCache: @unchecked Sendable {
         return URLSession(configuration: config)
     }()
 
-    init() { memory.countLimit = 400 }
+    init() { memory.countLimit = 1500 }
+
+    /// Decoded frames held strongly for an open game / review / spectate session (NSCache may
+    /// evict under pressure; these may not), keyed by session scope. Dropped when that session
+    /// closes (`unpin`), and gone with the process, so nothing outlives the app.
+    private let pinned = UMLocked<[String: [URL: Entry]]>([:])
+    /// One fetch + decode per URL at a time: rows that appear together share it.
+    private let inflight = UMLocked<[URL: Task<Entry?, Never>]>([:])
+    #if DEBUG
+    /// Network fetches made by this cache (memory/pinned hits don't count). Diagnostics only.
+    static let networkFetches = UMLocked<Int>(0)
+    /// Memory misses that had to read bytes (network, URL cache, upload disk cache or file) and decode.
+    static let loads = UMLocked<Int>(0)
+    #endif
 
     func frames(for url: URL) -> (images: [UMPlatformImage], delays: [Double])? {
-        memory.object(forKey: url as NSURL).map { ($0.images, $0.delays) }
+        if let e = memory.object(forKey: url as NSURL) { return (e.images, e.delays) }
+        let pin = pinned.withLock { p in p.values.lazy.compactMap { $0[url] }.first }
+        if let pin {
+            memory.setObject(pin, forKey: url as NSURL)
+            return (pin.images, pin.delays)
+        }
+        return nil
     }
 
     func store(_ images: [UMPlatformImage], delays: [Double], for url: URL) {
         memory.setObject(Entry(images, delays), forKey: url as NSURL)
+    }
+
+    /// Memory, then a shared in-flight load, then disk/network + decode (stored for next time).
+    func loadFrames(for url: URL) async -> (images: [UMPlatformImage], delays: [Double])? {
+        if let hit = frames(for: url) { return hit }
+        let task: Task<Entry?, Never> = inflight.withLock { map in
+            if let t = map[url] { return t }
+            let t = Task<Entry?, Never> {
+                #if DEBUG
+                let n = Self.loads.withLock { v in v += 1; return v }
+                UMDiag.log("img", "load #\(n) \(url.isFileURL ? "file" : url.host() ?? "?") \(url.lastPathComponent)")
+                #endif
+                guard let data = try? await self.data(for: url) else { return nil }
+                let parsed = AnimatedWebPView.decodeFrames(data)
+                guard !parsed.images.isEmpty else { return nil }
+                let e = Entry(parsed.images, parsed.delays)
+                self.memory.setObject(e, forKey: url as NSURL)
+                return e
+            }
+            map[url] = t
+            return t
+        }
+        let entry = await task.value
+        inflight.withLock { _ = $0.removeValue(forKey: url) }
+        return entry.map { ($0.images, $0.delays) }
+    }
+
+    /// Load (if needed) and hold every URL for `scope` until `unpin(scope:)`. Six at a time.
+    func pin(_ urls: [URL], scope: String) async {
+        let todo = Array(Set(urls))
+        guard !todo.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var it = todo.makeIterator()
+            func addNext() -> Bool {
+                guard let url = it.next() else { return false }
+                group.addTask {
+                    guard let f = await self.loadFrames(for: url) else { return }
+                    self.pinned.withLock { $0[scope, default: [:]][url] = Entry(f.images, f.delays) }
+                }
+                return true
+            }
+            for _ in 0..<6 { if !addNext() { break } }
+            while await group.next() != nil { _ = addNext() }
+        }
+        #if DEBUG
+        let n = pinned.withLock { $0[scope]?.count ?? 0 }
+        UMDiag.log("img", "pinned \(n) of \(todo.count) for \(scope)")
+        #endif
+    }
+
+    func unpin(scope: String) {
+        let n = pinned.withLock { $0.removeValue(forKey: scope)?.count ?? 0 }
+        if n > 0 { UMDiag.log("img", "unpinned \(n) for \(scope)") }
     }
 
     /// Drops decoded frames for custom user assets only (site emotes / role icons stay).
@@ -170,6 +242,7 @@ final class UMImageCache: @unchecked Sendable {
     /// You-tab clear: drop every decoded frame and the on-disk image responses.
     func clearAll() {
         memory.removeAllObjects()
+        pinned.withLock { $0.removeAll() }
         customKeys.withLock { $0.removeAll() }
         session.configuration.urlCache?.removeAllCachedResponses()
     }
@@ -182,6 +255,7 @@ final class UMImageCache: @unchecked Sendable {
         for url in urls {
             memory.removeObject(forKey: url as NSURL)
             customKeys.withLock { _ = $0.remove(url) }
+            pinned.withLock { p in for k in p.keys { p[k]?[url] = nil } }
             let req = URLRequest(url: url)
             session.configuration.urlCache?.removeCachedResponse(for: req)
             URLCache.shared.removeCachedResponse(for: req)
@@ -198,6 +272,10 @@ final class UMImageCache: @unchecked Sendable {
             customKeys.withLock { _ = $0.insert(url) }
             return try await UMCustomAssetCache.shared.data(for: url)
         }
+        #if DEBUG
+        let n = Self.networkFetches.withLock { v in v += 1; return v }
+        UMDiag.log("img", "fetch #\(n) \(url.lastPathComponent)")
+        #endif
         let (data, response) = try await session.data(for: UMAccess.request(url))
         if let http = response as? HTTPURLResponse, http.statusCode >= 400 { throw URLError(.badServerResponse) }
         return data
@@ -224,8 +302,19 @@ struct AnimatedWebPView: View {
     @State private var index = 0
     /// Bumped when this URL is purged after an upload, forcing a reload.
     @State private var revision = 0
+    /// URL the `frames` state belongs to.
+    @State private var loadedURL: URL?
+
+    /// What to draw now. A freshly created view (a row that just appeared, a new phase's rows)
+    /// reads the shared cache synchronously, so a cached image is on screen in the very first
+    /// frame instead of a spinner until `.task` runs.
+    private var shownFrames: [UMPlatformImage] {
+        if loadedURL == url, !frames.isEmpty { return frames }
+        return UMImageCache.shared.frames(for: url)?.images ?? []
+    }
 
     var body: some View {
+        let frames = shownFrames
         Group {
             if let image = frames.indices.contains(index) ? frames[index] : frames.first {
                 if let h = fitHeight {
@@ -273,24 +362,25 @@ struct AnimatedWebPView: View {
     }
 
     private func load() async {
-        if let hit = UMImageCache.shared.frames(for: url) {
+        let target = url
+        if let hit = UMImageCache.shared.frames(for: target) {
             frames = hit.images
             delays = hit.delays
+            loadedURL = target
             index = 0
             return
         }
-        do {
-            let data = try await UMImageCache.shared.data(for: url)
-            let parsed = Self.frames(from: data)
-            if !parsed.images.isEmpty { UMImageCache.shared.store(parsed.images, delays: parsed.delays, for: url) }
-            await MainActor.run {
-                frames = parsed.images
-                delays = parsed.delays
-                index = 0
-            }
-        } catch {
-            frames = []
+        let loaded = await UMImageCache.shared.loadFrames(for: target)
+        await MainActor.run {
+            frames = loaded?.images ?? []
+            delays = loaded?.delays ?? []
+            loadedURL = target
+            index = 0
         }
+    }
+
+    static func decodeFrames(_ data: Data) -> (images: [UMPlatformImage], delays: [Double]) {
+        frames(from: data)
     }
 
     private static func frames(from data: Data) -> (images: [UMPlatformImage], delays: [Double]) {

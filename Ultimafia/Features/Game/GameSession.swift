@@ -1003,6 +1003,32 @@ final class GameSession {
         publishVisibleTypers()
     }
 
+    /// Key for this session's pinned images in UMImageCache (one per session object, so a review
+    /// and a live seat on the same game never share or clear each other's).
+    var assetScope: String { "session-\(ObjectIdentifier(self).hashValue)" }
+
+    /// Every image a game screen can draw that is known up front: each player's avatar, every
+    /// role (and modifier badge) in the setup, and the players' custom emotes / stickers.
+    var assetURLs: [URL] {
+        var urls: [URL] = []
+        for p in players {
+            if let path = p.deckAvatarPath, let u = UMAvatarURL.deck(path: path) { urls.append(u) }
+            else if p.avatar, let id = p.userId, !id.isEmpty, let u = UMAvatarURL.live(userId: id) { urls.append(u) }
+            urls += (Array(p.customEmotes.values) + Array(p.customStickers.values)).compactMap(UMMediaURL.resolve)
+        }
+        let type = setupGameType
+        for role in setupRolesets.flatMap({ $0 }) + setupBanished + setupEvents {
+            let parts = role.raw.split(separator: ":", maxSplits: 1)
+            if let u = RoleArt.roleURL(gameType: type, name: role.name) { urls.append(u) }
+            if parts.count > 1 {
+                let mods = parts[1].split(separator: "/").map(String.init).filter { !$0.isEmpty }
+                if mods.count == 1, let u = RoleArt.modifierURL(gameType: type, name: mods[0]) { urls.append(u) }
+                else if mods.count > 1, let u = RoleArt.badgeURL(modifierCount: mods.count) { urls.append(u) }
+            }
+        }
+        return urls
+    }
+
     /// Whether there is a phase `delta` steps from the one being viewed (swipe / arrows / a11y).
     func hasAdjacentPhase(delta: Int) -> Bool {
         let ids = sortedPhases.map(\.id)

@@ -86,10 +86,10 @@ struct UMPhaseSwipeBridge: UIViewRepresentable {
             guard let scroll else { return }
             switch p.state {
             case .began:
-                // Cancel the vertical pan that started with the same touch.
+                // Cancel the vertical pan that started with the same touch, so a sideways swipe
+                // never also drags the chat.
                 scroll.panGestureRecognizer.isEnabled = false
                 scroll.panGestureRecognizer.isEnabled = true
-                onChange?(p.translation(in: scroll).x)
             case .changed:
                 onChange?(p.translation(in: scroll).x)
             case .ended:

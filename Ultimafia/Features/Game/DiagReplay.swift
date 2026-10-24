@@ -43,6 +43,12 @@ struct DiagReplayView: View {
         }
         .task {
             try? await Task.sleep(for: .seconds(6))
+            if ProcessInfo.processInfo.arguments.contains("-UMDiagDetach") {
+                // Spectator back-out: the session closes (and its pinned images are released).
+                UMDiag.log("replay", "tabs: detach")
+                app.detachFromGame()
+                return
+            }
             UMDiag.log("replay", "tabs: back to lobby")
             app.goToLobby()
             try? await Task.sleep(for: .seconds(6))

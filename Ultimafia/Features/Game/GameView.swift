@@ -167,6 +167,11 @@ private struct GameScreen: View {
         .task { await RoleCatalog.shared.load(); UMSpeechLM.prepareIfNeeded() }
         // Warm the on-disk custom asset cache: own maps once, then every player's maps/avatars.
         .task(id: session.players.count) { await prefetchCustomAssets() }
+        // Hold every avatar / role icon / emote this game can show, decoded, until the session
+        // closes (AppModel unpins on leave, detach, review close), so phases never refetch.
+        .task(id: "\(session.players.count)|\(session.setupId ?? "")|\(session.setupRolesets.count)") {
+            await UMImageCache.shared.pin(session.assetURLs, scope: session.assetScope)
+        }
         // Whether the bar is showing is the AppModel's single decision (`showsAppTabs`), not
         // something this screen toggles; all the screen owns is whether the game is being watched.
         .onAppear {
@@ -558,8 +563,7 @@ private struct GameChatPane: View {
     /// True while a phase switch restores its position; tracking and auto-follow stand down.
     @State private var restoringScroll = false
     @State private var restoreGeneration = UUID()
-    /// Horizontal offset of the transcript while a phase swipe follows the finger.
-    @State private var swipeOffset: CGFloat = 0
+    /// Pane width, for the phase swipe's distance threshold.
     @State private var paneWidth: CGFloat = 390
 
     private var chatLines: [ChatLine] {
@@ -653,24 +657,33 @@ private struct GameChatPane: View {
                     // is already reserved by the scroll content margin, so this is only the room
                     // between the two.
                     .padding(.bottom, 12)
-                    .offset(x: swipeOffset)
-                    .opacity(1 - min(0.45, abs(swipeOffset) / max(paneWidth, 1) * 0.6))
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
                 #if DEBUG
-                // `-UMDiagSwipe <dx>`: hold the transcript mid-swipe (screenshots);
-                // `-UMDiagSwipeRelease <dx>`: drag to dx and let go, through the real handlers.
+                // `-UMDiagSwipeRelease <dx>`: one swipe of dx, released, through the real handler.
+                // `-UMDiagPhaseFlip <n>`: n swipes back and forth 1 s apart, logging how many image
+                // network fetches happened across them (should be 0 once the game is pinned).
                 .task {
                     let args = ProcessInfo.processInfo.arguments
-                    for flag in ["-UMDiagSwipe", "-UMDiagSwipeRelease"] {
-                        guard let i = args.firstIndex(of: flag), args.indices.contains(i + 1),
-                              let dx = Double(args[i + 1]) else { continue }
+                    if let i = args.firstIndex(of: "-UMDiagSwipeRelease"), args.indices.contains(i + 1),
+                       let dx = Double(args[i + 1]) {
                         try? await Task.sleep(for: .seconds(3))
-                        for step in 1...10 {
-                            swipeChanged(CGFloat(dx) * CGFloat(step) / 10)
-                            try? await Task.sleep(for: .milliseconds(16))
+                        swipeEnded(CGFloat(dx), 0)
+                    }
+                    if let i = args.firstIndex(of: "-UMDiagPhaseFlip"), args.indices.contains(i + 1),
+                       let n = Int(args[i + 1]) {
+                        try? await Task.sleep(for: .seconds(4))
+                        let before = UMImageCache.networkFetches.withLock { $0 }
+                        let loadsBefore = UMImageCache.loads.withLock { $0 }
+                        UMDiag.log("img", "flip start: \(before) fetches so far, phase \(session.viewingPhaseId)")
+                        for k in 0..<n {
+                            swipeEnded(k % 2 == 0 ? 200 : -200, 0)
+                            try? await Task.sleep(for: .seconds(1))
+                            UMDiag.log("img", "flip \(k + 1): phase \(session.viewingPhaseId)")
                         }
-                        if flag == "-UMDiagSwipeRelease" { swipeEnded(CGFloat(dx), 0) }
+                        let after = UMImageCache.networkFetches.withLock { $0 }
+                        let loadsAfter = UMImageCache.loads.withLock { $0 }
+                        UMDiag.log("img", "flip done: \(after - before) network fetches, \(loadsAfter - loadsBefore) image loads (memory misses) during \(n) phase switches")
                     }
                 }
                 #endif
@@ -873,40 +886,33 @@ private struct GameChatPane: View {
     }
 
     // MARK: Phase swipe
-    // Left to right = previous phase, right to left = next, like paging. The transcript follows the
-    // finger 1:1 when there is a phase that way and rubber-bands (a fifth of the drag, capped)
-    // when there isn't. Releasing past ~28% of the width, or flicking, commits: the old phase slides
-    // off, a light haptic, the new one springs in from the other side. Anything else springs back.
+    // Left to right = previous phase, right to left = next. Nothing moves while the finger is down
+    // (no follow, fade or rubber band: moving the rows inside the scroll view re-ran visibility
+    // tracking and fought the phase-position restore, which is what made it feel buggy). On
+    // release, a long enough or quick enough sideways swipe switches phase in one frame with
+    // animations off, plus a light haptic. With no phase that way it does nothing but a soft tick.
 
-    private func swipeChanged(_ dx: CGFloat) {
-        let possible = session.hasAdjacentPhase(delta: dx > 0 ? -1 : 1)
-        swipeOffset = possible ? dx : (dx > 0 ? 1 : -1) * min(abs(dx) * 0.2, 56)
-    }
+    private func swipeChanged(_ dx: CGFloat) {}
 
     private func swipeEnded(_ dx: CGFloat, _ vx: CGFloat) {
-        let delta = dx > 0 ? -1 : 1
-        let possible = dx != 0 && session.hasAdjacentPhase(delta: delta)
-        let far = abs(dx) > paneWidth * 0.28
-        let flick = abs(vx) > 600 && abs(dx) > 36 && (vx > 0) == (dx > 0)
+        guard dx != 0 else { return }
+        let far = abs(dx) > min(paneWidth * 0.22, 110)
+        let flick = abs(vx) > 500 && abs(dx) > 30 && (vx > 0) == (dx > 0)
         let reversing = abs(vx) > 300 && (vx > 0) != (dx > 0)
-        guard possible, far || flick, !reversing else {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { swipeOffset = 0 }
+        guard far || flick, !reversing else { return }
+        let delta = dx > 0 ? -1 : 1
+        guard session.hasAdjacentPhase(delta: delta) else {
+            #if os(iOS)
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.5)
+            #endif
             return
         }
-        let out = dx > 0 ? paneWidth : -paneWidth
-        withAnimation(.easeIn(duration: 0.12)) { swipeOffset = out }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            #if os(iOS)
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            #endif
-            session.viewAdjacentPhase(delta: delta)
-            var instant = Transaction()
-            instant.disablesAnimations = true
-            withTransaction(instant) { swipeOffset = -out * 0.4 }
-            DispatchQueue.main.async {
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { swipeOffset = 0 }
-            }
-        }
+        #if os(iOS)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        #endif
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { session.viewAdjacentPhase(delta: delta) }
     }
 
     private func jumpToTop() {
