@@ -110,6 +110,9 @@ struct NativeAppTabs: UIViewControllerRepresentable {
         }
 
         override var childForStatusBarStyle: UIViewController? { host }
+        /// The tab controller asks the selected Page; without this the Page answered itself (never
+        /// hidden) and the section's own `.statusBarHidden` (the game screen) was never consulted.
+        override var childForStatusBarHidden: UIViewController? { host }
     }
 }
 #endif

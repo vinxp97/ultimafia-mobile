@@ -8,6 +8,51 @@ struct DiagReplayView: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
+        #if os(iOS)
+        if ProcessInfo.processInfo.arguments.contains("-UMDiagTabs") {
+            tabs
+        } else {
+            standalone
+        }
+        #else
+        standalone
+        #endif
+    }
+
+    #if os(iOS)
+    /// `-UMDiagTabs`: the replay game inside the real app shell (UIKit tab controller, the Game
+    /// section's NavigationStack, the lobby), not the bare game screen, so anything that depends on
+    /// the hosting chain (status bar, tab bar) behaves the way it does when signed in. Then it walks
+    /// game -> lobby (what the back arrow does for a seated player) -> game, 6 s apart.
+    private var tabs: some View {
+        @Bindable var app = app
+        return NativeAppTabs(
+            selected: app.section,
+            mentionBadge: 0,
+            showsBar: app.showsAppTabs,
+            showsMessages: false,
+            play: AnyView(LobbyView().environment(app)),
+            game: AnyView(GameSectionView().environment(app)),
+            you: AnyView(Text("You").environment(app)),
+            onSelect: { app.select($0) }
+        )
+        .ignoresSafeArea()
+        .task {
+            app.section = .game
+            await run()
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(6))
+            UMDiag.log("replay", "tabs: back to lobby")
+            app.goToLobby()
+            try? await Task.sleep(for: .seconds(6))
+            UMDiag.log("replay", "tabs: game tab")
+            app.select(.game)
+        }
+    }
+    #endif
+
+    @ViewBuilder private var standalone: some View {
         let replay = NavigationStack {
             GameView()
         }
