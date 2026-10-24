@@ -127,8 +127,9 @@ enum NewspaperCopy {
     private static func isExposed(_ value: String) -> Bool {
         let v = value.lowercased()
         if v.isEmpty { return false }
-        if v == "???" || v == "?" { return false }
-        if v.contains("unknown") || v.contains("janitor") || v.contains("cleaned") { return false }
+        // Only placeholders are hidden. A cleaned (Janitor) death never carries a reveal at all on
+        // the server, so "Janitor" here is the victim's real role and must show.
+        if v == "???" || v == "?" || v == "unknown" { return false }
         return true
     }
 

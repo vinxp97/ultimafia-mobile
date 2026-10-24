@@ -132,11 +132,32 @@ struct DiagReplayView: View {
             // `-UMDiagGunshot [late|hidden]`: a Day gunshot 3 s in, sent the way the server does
             // (gunshot, alert, death, reveal, instant obituaries). `late`: the obituary carries no
             // reveal and the `reveal` event comes 2 s after the paper; `hidden`: no reveal at all;
-            // `eventonly`: see below.
+            // `eventonly`: see below. `real`: the exact shape of a live Frontier Justice Sheriff shot
+            // (Games/core: Gun.js -> Player.kill -> queueDeathMessage/revealToAll -> processObituaryQueue),
+            // a Janitor victim with a custom death message ("${name}#e9f792") and full getPlayerInfo().
             if let i = args.firstIndex(of: "-UMDiagGunshot") {
                 let variant = args.indices.contains(i + 1) ? args[i + 1] : "normal"
                 try? await Task.sleep(for: .seconds(3))
                 let now = Date().timeIntervalSince1970 * 1000
+                if variant == "real" {
+                    s.debugFeed("gunshot", nil)
+                    s.debugFeed("message", ["id": "gun-alert", "senderId": "server", "content": ":gun: Player2 pulls a gun and shoots at Player4!",
+                                            "time": now, "meetingId": "village"])
+                    s.debugFeed("death", "p4")
+                    s.debugFeed("reveal", ["playerId": "p4", "role": "Janitor:"])
+                    let info: [String: Any] = ["id": "p4", "name": "Player4", "userId": "u4", "avatar": false,
+                                               "textColor": "#FFF", "nameColor": "#68a9dc", "animatedNameColor": "gradient",
+                                               "nameGradientColorA": "#ffffff", "nameGradientColorB": "#be9d27",
+                                               "nameGradientColorC": "#3dff6a", "customEmotes": [String: Any](),
+                                               "customStickers": [String: Any](), "isBirthday": false,
+                                               "avatarShape": "circle", "playerListPosition": 4]
+                    s.debugFeed("obituaries", ["id": "2:instant-\(Int(now))", "source": "instant-\(Int(now))", "dayCount": 1, "time": now,
+                                               "obituaries": [["snippets": ["deathMessage": "Player4#e9f792",
+                                                                            "revealMessage": "Player4's role is Janitor."],
+                                                               "id": "p4", "playerInfo": info]]])
+                    UMDiag.log("replay", "gunshot real")
+                    return
+                }
                 s.debugFeed("gunshot", nil)
                 s.debugFeed("message", ["id": "gun-alert", "senderId": "server", "content": ":gun: Player2 pulls a gun and shoots at Player4!",
                                         "time": now, "meetingId": "village"])
