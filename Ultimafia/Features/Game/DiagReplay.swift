@@ -49,6 +49,29 @@ struct DiagReplayView: View {
             ["id": "m\(phase)-\(n)", "senderId": "p\(n % 12)", "content": "message \(n) in phase \(phase) about the cop and mafia vig claims",
              "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"]
         }
+        // `-UMDiagTopBar pregame|middle|latest`: a static game for screenshots of the header (with
+        // -UMDiagReplay): a real setup strip, a running clock, and the viewed phase at the start,
+        // in the middle (both arrows) or at the newest phase (back arrow only).
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
+            let mode = args[i + 1]
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia",
+                                  "roles": [["Villager:": 4, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1,
+                                             "Hooker:": 1, "Mafioso:": 2, "Godfather:": 1, "Serial Killer:": 1]]])
+            if mode == "pregame" {
+                s.debugFeed("timerInfo", ["name": "pregameCountdown", "delay": 154_000])
+                for n in 0..<12 { s.debugFeed("message", msg(n, phase: -1)) }
+            } else {
+                for (id, name) in [(0, "Day"), (1, "Night"), (2, "Day")] {
+                    s.debugFeed("state", ["id": id, "name": name, "dayCount": id / 2 + 1])
+                    for n in 0..<8 { s.debugFeed("message", msg(n, phase: id)) }
+                }
+                s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                if mode == "middle" { s.viewPhase(1) }
+            }
+            UMDiag.log("replay", "topbar \(mode)")
+            return
+        }
         if ProcessInfo.processInfo.arguments.contains("-UMDiagHistory") {
             // Joining a running game: the screen is up (empty) first, then the whole backlog arrives
             // in one `history` event, then `state`.

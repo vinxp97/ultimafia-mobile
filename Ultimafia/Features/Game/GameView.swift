@@ -68,7 +68,6 @@ private struct GameScreen: View {
                            // requestLeave: pregame leaves at once (no lock, no overlay); a started game shows LeaveConfirmOverlay.
                            onLeavePrompt: { app.requestLeave() },
                            showsGuides: threeColumns)
-                if !wideHeader, !session.isLiarsDice { SetupRoleStrip(session: session) }
                 Divider().overlay(UMTheme.line)
                 Group {
                     if threeColumns {
@@ -78,7 +77,7 @@ private struct GameScreen: View {
                             GameTownPane(session: session, compact: true)
                                 .frame(width: UMGameLayout.sideColumnWidth(geo.size.width))
                             Divider().overlay(UMTheme.line)
-                            GameChatPane(session: session, draft: $draft, chatFocused: chatFocused, showsPhaseBar: !wideHeader && !session.isLiarsDice)
+                            GameChatPane(session: session, draft: $draft, chatFocused: chatFocused, showsPhaseBar: false)
                                 .frame(maxWidth: .infinity)
                             Divider().overlay(UMTheme.line)
                             GameActPane(session: session)
@@ -104,7 +103,7 @@ private struct GameScreen: View {
                                 session: session,
                                 draft: $draft,
                                 chatFocused: chatFocused,
-                                showsPhaseBar: !wideHeader && !session.isLiarsDice,
+                                showsPhaseBar: false,
                                 isOnScreen: selectedPanel == 0
                             )
                             .opacity(selectedPanel == 0 ? 1 : 0)
@@ -249,30 +248,109 @@ private struct GameHeader: View {
     @AppStorage("um.showSetupGuides") private var showSetupGuides = true
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            if let onClose {
+        if wide { wideBody } else { compactBody }
+    }
+
+    /// Back / leave: a Liquid Glass circle with a chevron. Seated players keep tap = lobby and
+    /// press-and-hold = Leave (same confirmation rules as before); everyone else gets tap only.
+    @ViewBuilder private var backButton: some View {
+        if let onClose {
+            Group {
                 if seated, let onLeavePrompt {
                     HoldToLeaveBackButton(onTap: onClose, onHold: onLeavePrompt)
                 } else {
                     Button(action: onClose) {
-                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
+                        GlassCircleLabel(systemName: "chevron.left", diameter: 44)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(session.isReview ? "Back to games" : (session.spectate ? "Stop spectating" : "Return to lobby"))
                 }
             }
+            // Connection dot rides on the circle (the setup name it used to sit beside is gone).
+            .overlay(alignment: .topTrailing) {
+                if !session.isReview {
+                    Circle()
+                        .fill(session.connected ? UMTheme.village : UMTheme.mafia)
+                        .frame(width: 9, height: 9)
+                        .overlay(Circle().stroke(UMTheme.bg, lineWidth: 1.5))
+                        .offset(x: -1, y: 1)
+                        .accessibilityHidden(true)
+                }
+            }
+            .accessibilityValue(session.isReview ? "" : (session.connected ? "Connected" : "Disconnected"))
+        }
+    }
+
+    @ViewBuilder private var statusBadges: some View {
+        if session.isReview {
+            Text("REVIEW")
+                .font(.caption2.weight(.bold))
+                .padding(.horizontal, 8).frame(height: 26)
+                .foregroundStyle(UMTheme.blood)
+                .glassEffect(.regular.tint(UMTheme.blood.opacity(0.25)), in: .capsule)
+        }
+        if session.finished, !session.isReview {
+            Text("Finished")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8).frame(height: 26)
+                .foregroundStyle(UMTheme.muted)
+                .glassEffect(.regular, in: .capsule)
+        }
+        if session.readyCheckActive {
+            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                let left = max(0, Int(session.readyEndTime.timeIntervalSince(context.date).rounded(.up)))
+                Text("Ready \(left)s")
+                    .font(.caption.weight(.bold).monospacedDigit())
+                    .foregroundStyle(left < 10 ? UMTheme.mafia : UMTheme.village)
+                    .padding(.horizontal, 8).frame(height: 26)
+                    .glassEffect(.regular, in: .capsule)
+            }
+        }
+    }
+
+    /// iPhone (and iPad / Mac windows too narrow for the one-row header): two compact rows of
+    /// Liquid Glass. Row 1: back circle, roles strip, status, timer. Row 2: phase capsule with
+    /// previous / next circles (each shown only when there is a phase that way).
+    private var compactBody: some View {
+        GlassEffectContainer(spacing: 10) {
+            VStack(spacing: 6) {
+                HStack(alignment: .center, spacing: 8) {
+                    backButton
+                    if session.isLiarsDice {
+                        Spacer(minLength: 8)
+                    } else {
+                        SetupRoleStrip(session: session, inHeader: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .layoutPriority(-1)
+                    }
+                    statusBadges
+                    PhaseTimerBadge(session: session, glass: true)
+                    if showsGuides, showSetupGuides, session.setupId != nil {
+                        SetupGuidesButton(session: session, fillsWidth: false)
+                    }
+                }
+                if !session.isLiarsDice {
+                    GlassPhaseNavigator(session: session)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
+        .background(UMTheme.bg)
+    }
+
+    /// iPad one-row header (regular width, 820 pt+): unchanged apart from the glass back circle.
+    private var wideBody: some View {
+        HStack(alignment: .center, spacing: 8) {
+            backButton
             if session.isReview {
                 Text("REVIEW")
                     .font(.caption2.weight(.bold))
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(UMTheme.blood.opacity(0.25), in: Capsule())
                     .foregroundStyle(UMTheme.blood)
-            } else {
-                // The chevron above is the way back to the lobby while the bar is hidden; the game
-                // keeps running and stays reachable from the Game tab.
-                Circle()
-                    .fill(session.connected ? UMTheme.village : UMTheme.mafia)
-                    .frame(width: 8, height: 8)
             }
             Text(session.setupName ?? session.gameType ?? "Game")
                 .font(.headline)
@@ -329,10 +407,7 @@ private struct HoldToLeaveBackButton: View {
             if holdFired { holdFired = false; return }
             onTap()
         } label: {
-            Image(systemName: "arrow.left")
-                .font(.body.weight(.semibold))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            GlassCircleLabel(systemName: "chevron.left", diameter: 44)
         }
         .buttonStyle(HoldScaleButtonStyle())
         .simultaneousGesture(
@@ -343,7 +418,6 @@ private struct HoldToLeaveBackButton: View {
                     onHold()
                 }
         )
-        .padding(.horizontal, -6)
         .accessibilityLabel("Return to lobby")
         .accessibilityHint("Press and hold to leave the game")
         .accessibilityAction(named: "Leave game", onHold)

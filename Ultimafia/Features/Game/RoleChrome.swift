@@ -524,6 +524,8 @@ struct RolePoolSheet: View {
 
 struct SetupRoleStrip: View {
     var session: GameSession
+    /// In the compact game header: no card background or row padding (the header owns those).
+    var inHeader = false
 
     var body: some View {
         SetupPreviewStrip(
@@ -533,7 +535,7 @@ struct SetupRoleStrip: View {
             isSimpleMulti: session.isSimpleMulti,
             displayedRoles: session.setupRoles,
             onCycle: { session.cycleSetupRoleset() },
-            compact: false,
+            compact: inHeader,
             events: session.setupEvents,
             eventsPerSet: session.setupEventsPerSet,
             grouped: session.setupGrouped,

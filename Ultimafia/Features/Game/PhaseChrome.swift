@@ -278,11 +278,29 @@ struct PulsingDots: View {
 
 struct PhaseTimerBadge: View {
     var session: GameSession
+    /// Compact game header: a Liquid Glass capsule, tinted for the warning clocks.
+    var glass = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.2)) { context in
             let kind = session.clockKind
             let text = format(session.clockRemainingMs(at: context.date))
+            if glass {
+                Text(text)
+                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(foreground(kind))
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .glassEffect(kind == .normal ? .regular : .regular.tint(border(kind).opacity(0.3)), in: .capsule)
+                    .overlay {
+                        if kind != .normal {
+                            Capsule().strokeBorder(border(kind), style: StrokeStyle(lineWidth: 1.5, dash: dashes(kind)))
+                        }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Time left")
+                    .accessibilityValue(text)
+            } else {
             Text(text)
                 .font(.system(.title3, design: .monospaced).weight(.semibold))
                 .foregroundStyle(foreground(kind))
@@ -293,6 +311,7 @@ struct PhaseTimerBadge: View {
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(border(kind), style: StrokeStyle(lineWidth: 1.5, dash: dashes(kind)))
                 )
+            }
         }
     }
 
@@ -324,6 +343,98 @@ struct PhaseTimerBadge: View {
         switch kind {
         case .secondary, .vegKickCountdown: return [5, 3]
         default: return []
+        }
+    }
+}
+
+/// A glass disc with an SF Symbol, sized for a 44 pt hit target (or drawn smaller inside one).
+struct GlassCircleLabel: View {
+    var systemName: String
+    var diameter: CGFloat = 44
+    var hitSize: CGFloat = 44
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.system(size: diameter * 0.4, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: diameter, height: diameter)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .frame(width: max(hitSize, diameter), height: max(hitSize, diameter))
+            .contentShape(Circle())
+    }
+}
+
+/// Compact game header phase row: the viewed phase (icon + name) on a glass capsule, with glass
+/// previous / next circles. An arrow is drawn only when there is a phase that way (a same-size
+/// clear slot keeps the capsule centred). The capsule opens a menu of every phase, which keeps the
+/// old bar's "tap any phase" jump. Navigation goes through the same session calls as before.
+struct GlassPhaseNavigator: View {
+    var session: GameSession
+
+    var body: some View {
+        let phases = session.sortedPhases
+        let index = phases.firstIndex { $0.id == session.viewingPhaseId }
+        let current = index.map { phases[$0] } ?? phases.last
+        let hasPrev = (index ?? 0) > 0
+        let hasNext = index.map { $0 < phases.count - 1 } ?? false
+        HStack(spacing: 6) {
+            arrow("chevron.left", label: "Previous phase", target: hasPrev ? phases[index! - 1] : nil, delta: -1)
+            Menu {
+                ForEach(phases) { phase in
+                    Button {
+                        session.viewPhase(phase.id)
+                    } label: {
+                        Label(PhaseBar.shortLabel(phase) + (phase.id == session.currentPhaseId ? " (now)" : ""),
+                              systemImage: PhaseBar.icon(for: phase.name))
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if let current {
+                        Image(systemName: PhaseBar.icon(for: current.name))
+                            .foregroundStyle(session.isViewingLive ? UMTheme.blood : UMTheme.muted)
+                        Text(PhaseBar.shortLabel(current))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    if !session.isViewingLive {
+                        Text("past")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(UMTheme.muted)
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .frame(minWidth: 96, minHeight: 36)
+                .glassEffect(.regular.interactive(), in: .capsule)
+                .frame(minHeight: 44)
+                .contentShape(Capsule())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .accessibilityLabel("Phase")
+            .accessibilityValue(current.map { PhaseBar.shortLabel($0) + (session.isViewingLive ? "" : ", past phase") } ?? "")
+            .accessibilityHint("Choose a phase to view")
+            arrow("chevron.right", label: "Next phase", target: hasNext ? phases[index! + 1] : nil, delta: 1)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func arrow(_ symbol: String, label: String, target: GamePhase?, delta: Int) -> some View {
+        if let target {
+            Button {
+                session.viewAdjacentPhase(delta: delta)
+            } label: {
+                GlassCircleLabel(systemName: symbol, diameter: 34)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+            .accessibilityValue(PhaseBar.shortLabel(target))
+            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+        } else {
+            Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
         }
     }
 }
