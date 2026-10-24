@@ -51,6 +51,12 @@ private struct GameScreen: View {
     var onLeave: () -> Void
     var onDetach: () -> Void
     @Environment(\.horizontalSizeClass) private var hSizeClass
+    /// Height of the floating glass header (compact layouts); the panes reserve it as a top inset
+    /// so their content scrolls underneath the glass without anything being stuck behind it.
+    @State private var headerHeight: CGFloat = 0
+    /// The game screen hides the status bar only while it is the screen on show; any other tab,
+    /// a pushed profile or the lobby gets it back.
+    @State private var isOnScreen = false
 
     var body: some View {
         GeometryReader { geo in
@@ -61,14 +67,21 @@ private struct GameScreen: View {
             #endif
             let threeColumns = UMGameLayout.usesThreeColumns(geo.size, regular: regular)
             let wideHeader = UMGameLayout.usesWideHeader(geo.size.width, regular: regular)
-            VStack(spacing: 0) {
-                // returnToLobby keeps a seated player's connection (the Lobby tab action does the
-                // same) and closes spectators and reviews, so the header always has a way out.
-                GameHeader(session: session, wide: wideHeader, onClose: returnToLobby, onLeave: onLeave,
+            // Compact layouts (iPhone, narrow iPad windows): the header is Liquid Glass floating over
+            // the panes, so the chat scrolls underneath it. The wide iPad header stays a solid row.
+            let floating = !wideHeader
+            let topInset = floating ? headerHeight : 0
+            // returnToLobby keeps a seated player's connection (the Lobby tab action does the
+            // same) and closes spectators and reviews, so the header always has a way out.
+            let header = GameHeader(session: session, wide: wideHeader, onClose: returnToLobby, onLeave: onLeave,
                            // requestLeave: pregame leaves at once (no lock, no overlay); a started game shows LeaveConfirmOverlay.
                            onLeavePrompt: { app.requestLeave() },
                            showsGuides: threeColumns)
-                Divider().overlay(UMTheme.line)
+            VStack(spacing: 0) {
+                if !floating {
+                    header
+                    Divider().overlay(UMTheme.line)
+                }
                 Group {
                     if threeColumns {
                         // iPad landscape: Village 25% | Chat 50% | Act 25%, each scrolling on its own.
@@ -92,10 +105,12 @@ private struct GameScreen: View {
                         // what is on screen while it is hidden.
                         ZStack {
                             GameTownPane(session: session)
+                                .safeAreaPadding(.top, topInset)
                                 .opacity(selectedPanel == 1 ? 1 : 0)
                                 .allowsHitTesting(selectedPanel == 1)
                                 .accessibilityHidden(selectedPanel != 1)
                             GameActPane(session: session)
+                                .safeAreaPadding(.top, topInset)
                                 .opacity(selectedPanel == 2 ? 1 : 0)
                                 .allowsHitTesting(selectedPanel == 2)
                                 .accessibilityHidden(selectedPanel != 2)
@@ -104,7 +119,8 @@ private struct GameScreen: View {
                                 draft: $draft,
                                 chatFocused: chatFocused,
                                 showsPhaseBar: false,
-                                isOnScreen: selectedPanel == 0
+                                isOnScreen: selectedPanel == 0,
+                                topInset: topInset
                             )
                             .opacity(selectedPanel == 0 ? 1 : 0)
                             .allowsHitTesting(selectedPanel == 0)
@@ -117,11 +133,25 @@ private struct GameScreen: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .top) {
+                    if floating {
+                        header
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                if abs(headerHeight - h) > 0.25 { headerHeight = h }
+                            }
+                    }
+                }
                 GamePanelPicker(session: session, selectedPanel: $selectedPanel, showsPanelTabs: !threeColumns)
             }
         }
         .background(UMTheme.bg.ignoresSafeArea())
         .background { gameShortcuts }
+        #if os(iOS)
+        // iPhone / iPad: the game is full-bleed; the clock and battery come back everywhere else.
+        .statusBarHidden(isOnScreen)
+        #endif
+        .onAppear { isOnScreen = true }
+        .onDisappear { isOnScreen = false }
         .umNavigationBar(.hidden)
         .navigationBarBackButtonHidden(true)
         .alert("Game", isPresented: errorBinding) {
@@ -300,15 +330,20 @@ private struct GameHeader: View {
     /// Liquid Glass. Row 1: back circle, roles strip, status, timer. Row 2: phase capsule with
     /// previous / next circles (each shown only when there is a phase that way).
     private var compactBody: some View {
-        GlassEffectContainer(spacing: 10) {
+        // Spacing below the row gaps so the back circle, roles capsule and timer stay three
+        // separate pieces of glass instead of melting into one bar.
+        GlassEffectContainer(spacing: 2) {
             VStack(spacing: 6) {
                 HStack(alignment: .center, spacing: 8) {
                     backButton
                     if session.isLiarsDice {
                         Spacer(minLength: 8)
                     } else {
+                        // One glass capsule for every role (centred, "…" at its right end).
                         SetupRoleStrip(session: session, inHeader: true)
-                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.horizontal, 6)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+                            .glassEffect(.regular, in: .capsule)
                             .layoutPriority(-1)
                     }
                     statusBadges
@@ -326,7 +361,6 @@ private struct GameHeader: View {
         .padding(.top, 4)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
-        .background(UMTheme.bg)
     }
 
     /// iPad one-row header (regular width, 820 pt+): unchanged apart from the glass back circle.
@@ -506,6 +540,9 @@ private struct GameChatPane: View {
     /// False while another panel is showing. The pane stays alive so its position survives the
     /// switch, but it stops recording what the reader can see while it is off screen.
     var isOnScreen = true
+    /// Room for the floating glass header: the transcript scrolls under it, but its first line,
+    /// "top" and the jump buttons sit below it.
+    var topInset: CGFloat = 0
     @AppStorage("um.chatLayout") private var chatLayout: ChatLayout = .standard
     @AppStorage("um.showTypingIndicator") private var showTypingIndicator = true
     @AppStorage("um.showVotingLog") private var showVotingLog = true
@@ -610,6 +647,8 @@ private struct GameChatPane: View {
                 }
                 .pointerScrolling()
                 .contentMargins(.bottom, composerOverlayHeight, for: .scrollContent)
+                .contentMargins(.top, topInset, for: .scrollContent)
+                .contentMargins(.top, topInset, for: .scrollIndicators)
                 .scrollDismissesKeyboard(.interactively)
                 .overlay(alignment: .top) {
                     if !transcriptScroll.isAtTop {
@@ -623,7 +662,7 @@ private struct GameChatPane: View {
                                 .background(UMTheme.card.opacity(0.92), in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 4)
+                        .padding(.top, topInset + 4)
                         .accessibilityLabel("Scroll to top")
                     }
                 }
@@ -641,7 +680,7 @@ private struct GameChatPane: View {
                             }
                         }
                         .padding(.trailing, 6)
-                        .padding(.top, 4)
+                        .padding(.top, topInset + 4)
                     }
                 }
                 .overlay(alignment: .bottom) {

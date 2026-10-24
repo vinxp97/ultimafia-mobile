@@ -353,11 +353,11 @@ struct SetupPreviewStrip: View {
                     // Longest prefix that fits, measured by ViewThatFits against the real width.
                     let all = chips
                     ViewThatFits(in: .horizontal) {
-                        chipRow(all, ellipsis: false)
+                        capsuleRow(all, ellipsis: false)
                         ForEach(Array(stride(from: all.count - 1, through: 1, by: -1)), id: \.self) { k in
-                            chipRow(Array(all.prefix(k)), ellipsis: true)
+                            capsuleRow(Array(all.prefix(k)), ellipsis: true)
                         }
-                        chipRow([], ellipsis: true)
+                        capsuleRow([], ellipsis: true)
                     }
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -445,17 +445,35 @@ struct SetupPreviewStrip: View {
     private func chipRow(_ items: [Chip], ellipsis: Bool) -> some View {
         HStack(spacing: compact ? 6 : 8) {
             ForEach(items) { chipView($0) }
+        }
+        .fixedSize()
+    }
+
+    /// Header capsule contents: chips centred in the capsule (in the room left of the "…" when it
+    /// shows), the "…" pinned to its right end. The ideal width is the chips plus the "…" slot,
+    /// which is what ViewThatFits compares with the room.
+    private func capsuleRow(_ items: [Chip], ellipsis: Bool) -> some View {
+        HStack(spacing: 2) {
+            chipRow(items, ellipsis: false)
+                .frame(maxWidth: .infinity)
             if ellipsis {
                 Button { showAll = true } label: {
-                    GlassCircleLabel(systemName: "ellipsis", diameter: 30, hitSize: 44)
+                    Image(systemName: "ellipsis")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(.white.opacity(0.14), in: Circle())
+                        .frame(width: Self.ellipsisSlot, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("All roles")
                 .accessibilityHint("Shows every role in the setup")
             }
         }
-        .fixedSize()
     }
+
+    private static let ellipsisSlot: CGFloat = 34
 
     @ViewBuilder
     private func chipView(_ chip: Chip) -> some View {
