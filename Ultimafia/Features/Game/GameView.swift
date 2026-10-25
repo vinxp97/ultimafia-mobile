@@ -7,9 +7,18 @@ struct GameView: View {
     @Environment(AppModel.self) private var app
     var review = false
     @State private var draft = ""
-    @State private var selectedPanel = 0
+    @State private var selectedPanel = GameView.initialPanel
     /// Composer focus (UIKit-backed field; Return never resigns first responder).
     @State private var chatFocused = false
+
+    /// Chat, except `-UMDiagVotes act|actbottom` (DEBUG) opens on the Act tab for screenshots.
+    private static var initialPanel: Int {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-UMDiagVotes"), args.indices.contains(i + 1), args[i + 1].hasPrefix("act") { return 2 }
+        #endif
+        return 0
+    }
 
     var body: some View {
         Group {
@@ -1939,24 +1948,22 @@ private struct CompactTownList: ViewModifier {
 
 private struct GameActPane: View {
     var session: GameSession
-    /// Chosen meeting per phase (live and review), so updates don't jump the selection.
+    /// Action Layout: Modern ("tabs", default) is the tab bar that switches between actions;
+    /// Legacy ("stack") stacks every action in one scroll with the More actions pill.
+    @AppStorage(UMActLayout.key) private var actLayout = UMActLayout.tabs
+    /// Tabs: chosen meeting per phase (live and review), so updates don't jump the selection.
     @State private var selectedByPhase: [Int: String] = [:]
+    @State private var scrollPosition = ScrollPosition(edge: .top)
+    /// More content (another action, the kick card) below the visible area.
+    @State private var moreBelow = false
 
-    /// Server/web order (meetings arrive in the game's meeting order).
+    /// Every action stacked in desktop order: web buildActionDescriptors lists regular meetings in
+    /// the game's meeting order, then true-item actions (Gun, Knife, …).
     private var actMeetings: [VoteMeeting] {
-        session.meetingsForViewing.filter {
+        let list = session.meetingsForViewing.filter {
             !$0.isVoteKick && !(session.isLiarsDice && LDState.importantMeetings.contains($0.name))
         }
-    }
-
-    private var phaseKey: Int { session.isViewingLive ? session.currentPhaseId : session.viewingPhaseId }
-
-    /// Stable selection; default is the first meeting still needing your vote (web Game.jsx
-    /// picks `!playerHasVoted && voting && canVote`), else the first meeting.
-    private var selected: VoteMeeting? {
-        let list = actMeetings
-        if let id = selectedByPhase[phaseKey], let m = list.first(where: { $0.id == id }) { return m }
-        return list.first { $0.canVote && !$0.playerHasVoted && $0.selections(of: session.selfId).isEmpty } ?? list.first
+        return list.filter { !$0.itemIsTrueItem } + list.filter(\.itemIsTrueItem)
     }
 
     var body: some View {
@@ -1971,12 +1978,19 @@ private struct GameActPane: View {
                     Text(emptyCopy)
                         .foregroundStyle(UMTheme.muted)
                         .padding(16)
-                } else if actMeetings.count == 1, let only = actMeetings.first {
-                    MeetingBlock(session: session, meeting: only)
+                } else if tabbed {
+                    if actMeetings.count == 1, let only = actMeetings.first {
+                        MeetingBlock(session: session, meeting: only)
+                    } else {
+                        meetingSwitcher
+                        if let meeting = selected {
+                            MeetingBlock(session: session, meeting: meeting)
+                                .id(meeting.id)
+                        }
+                    }
                 } else {
-                    meetingSwitcher
-                    if let meeting = selected {
-                        MeetingBlock(session: session, meeting: meeting)
+                    ForEach(actMeetings) { meeting in
+                        MeetingBlock(session: session, meeting: meeting, needsVote: needsVote(meeting))
                             .id(meeting.id)
                     }
                 }
@@ -1988,7 +2002,91 @@ private struct GameActPane: View {
                     .padding(.bottom, 16)
             }
         }
+        .scrollPosition($scrollPosition)
+        .onScrollGeometryChange(for: Bool.self) { geo in
+            // visibleRect spans the whole viewport (containerSize leaves out the top inset under
+            // the floating header), so its maxY reaches contentSize at the end of the scroll.
+            geo.contentSize.height + geo.contentInsets.bottom - geo.visibleRect.maxY > 24
+        } action: { _, below in
+            moreBelow = below
+        }
+        // Same pill as the chat's "Scroll to latest message ↓": shown while actions are below the
+        // fold, scrolls to the end on tap, gone once you're at the bottom.
+        .overlay(alignment: .bottom) {
+            if moreBelow, !tabbed {
+                Button {
+                    withAnimation(.easeOut(duration: 0.3)) { scrollPosition.scrollTo(edge: .bottom) }
+                } label: {
+                    Text("More actions ↓")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(UMTheme.blood, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 12)
+                .transition(.opacity)
+                .accessibilityLabel("More actions below, scroll down")
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: moreBelow)
         .pointerScrolling()
+        .onChange(of: session.viewingPhaseId) { _, _ in
+            scrollPosition.scrollTo(edge: .top)
+        }
+        #if DEBUG
+        .task {
+            // `-UMDiagVotes actbottom`: scroll to the end 3 s in (pill should hide).
+            let args = ProcessInfo.processInfo.arguments
+            if let i = args.firstIndex(of: "-UMDiagVotes"), args.indices.contains(i + 1), args[i + 1] == "actbottom" {
+                try? await Task.sleep(for: .seconds(3))
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+        }
+        #endif
+    }
+
+    private var tabbed: Bool { actLayout != UMActLayout.stack }
+
+    private var phaseKey: Int { session.isViewingLive ? session.currentPhaseId : session.viewingPhaseId }
+
+    /// Tabs: stable selection; default is the first meeting still needing your vote (web
+    /// Game.jsx picks `!playerHasVoted && voting && canVote`), else the first meeting.
+    private var selected: VoteMeeting? {
+        let list = actMeetings
+        if let id = selectedByPhase[phaseKey], let m = list.first(where: { $0.id == id }) { return m }
+        return list.first { $0.canVote && !$0.playerHasVoted && $0.selections(of: session.selfId).isEmpty } ?? list.first
+    }
+
+    private var meetingSwitcher: some View {
+        let binding = Binding<String>(
+            get: { selected?.id ?? "" },
+            set: { selectedByPhase[phaseKey] = $0 }
+        )
+        return ScrollView(.horizontal, showsIndicators: false) {
+            Picker("Meeting", selection: binding) {
+                ForEach(actMeetings) { m in
+                    Text(switcherTitle(m)).tag(m.id)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        .accessibilityLabel("Choose meeting")
+    }
+
+    /// Dot marks a live meeting still waiting on your vote.
+    private func switcherTitle(_ m: VoteMeeting) -> String {
+        let needs = session.isViewingLive && m.canVote && m.selections(of: session.selfId).isEmpty
+        let title = m.name == m.actionName ? m.name : m.actionName
+        return needs ? "• " + title : title
+    }
+
+    /// Live meeting still waiting on your vote (web picks `!playerHasVoted && voting && canVote`).
+    private func needsVote(_ m: VoteMeeting) -> Bool {
+        session.isViewingLive && m.canVote && !m.playerHasVoted && m.selections(of: session.selfId).isEmpty
     }
 
     /// Web "Vote Kick" button: shown in any phase while the veg-kick meeting is live.
@@ -2031,31 +2129,6 @@ private struct GameActPane: View {
         .background(UMTheme.card, in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private var meetingSwitcher: some View {
-        let binding = Binding<String>(
-            get: { selected?.id ?? "" },
-            set: { selectedByPhase[phaseKey] = $0 }
-        )
-        return ScrollView(.horizontal, showsIndicators: false) {
-            Picker("Meeting", selection: binding) {
-                ForEach(actMeetings) { m in
-                    Text(switcherTitle(m)).tag(m.id)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-        }
-        .accessibilityLabel("Choose meeting")
-    }
-
-    /// Dot marks a live meeting still waiting on your vote.
-    private func switcherTitle(_ m: VoteMeeting) -> String {
-        let needs = session.isViewingLive && m.canVote && m.selections(of: session.selfId).isEmpty
-        let title = m.name == m.actionName ? m.name : m.actionName
-        return needs ? "• " + title : title
-    }
-
     private var emptyCopy: String {
         if session.spectate { return "Spectating. No actions." }
         if !session.isViewingLive { return "No actions in this phase." }
@@ -2067,8 +2140,15 @@ private struct GameActPane: View {
 private struct MeetingBlock: View {
     var session: GameSession
     var meeting: VoteMeeting
-    @AppStorage("um.voteListDisplay") private var voteListDisplay = "avatars"
+    var needsVote: Bool = false
     @State private var textDraft = ""
+
+    /// Headline is the server's action name, as on desktop ("Vote to Condemn", "Mafia Kill",
+    /// "Shoot", a role's action); the tag says where it comes from (item, else meeting name).
+    private var source: String? {
+        if let item = meeting.itemName, !item.isEmpty { return item }
+        return meeting.name != meeting.actionName ? meeting.name : nil
+    }
 
     private var clickable: Bool {
         session.isViewingLive && meeting.canVote && !session.spectate
@@ -2079,16 +2159,32 @@ private struct MeetingBlock: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 8) {
+                if needsVote {
+                    Circle()
+                        .fill(UMTheme.blood)
+                        .frame(width: 8, height: 8)
+                        .accessibilityLabel("Needs your vote")
+                }
                 Text(meeting.actionName)
                     .font(.headline)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
                 Spacer(minLength: 8)
-                if let item = meeting.itemName, !item.isEmpty {
-                    Text(item)
-                        .font(.caption)
+                if let source {
+                    Text(source)
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(UMTheme.muted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(UMTheme.elevated, in: Capsule())
                 }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
             if meeting.inputType == "text", session.isReview {
                 if meeting.votesInvisible {
                     Text("Vote targets are hidden.")
@@ -2231,7 +2327,6 @@ private struct MeetingBlock: View {
         let label = session.voteLabel(target, meeting: meeting)
         let pickIds: [String] = (isPlayer && !meeting.votesInvisible && !meeting.hiddenVoterIds.contains(target)) ? meeting.selections(of: target) : []
         let theirPick = pickIds.map { session.voteLabel($0, meeting: meeting) }.joined(separator: ", ")
-        let avatars = voteListDisplay != "names"
         let leader = count > 0 && count == leaderCount
         return Button {
             guard canTap else { return }
@@ -2245,14 +2340,19 @@ private struct MeetingBlock: View {
                     .frame(minWidth: 26, minHeight: 20)
                     .background(leader ? Color(red: 0.78, green: 0.29, blue: 0.29) : Color(red: 0.24, green: 0.45, blue: 0.75),
                                 in: Capsule())
-                // Voter is always an avatar; the setting only changes how their pick is shown.
+                    .fixedSize()
+                    .layoutPriority(2)
+                // Always avatar + name for players, on both sides, whatever Vote Log Display says.
+                // Names share the row: each shrinks to 70% and then truncates, never past the card.
                 if isPlayer, let p = session.player(for: target) {
-                    UMAvatarView(player: p, size: 24)
+                    rowAvatar(p)
+                    rowName(label, color: .white)
                 } else {
                     Text(label)
-                        .font(.system(size: 14, weight: isPlayer ? .semibold : .regular))
-                        .foregroundStyle(isPlayer ? Color.white : UMTheme.muted)
+                        .font(.system(size: 14))
+                        .foregroundStyle(UMTheme.muted)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                         .truncationMode(.tail)
                         .layoutPriority(1)
                 }
@@ -2261,21 +2361,17 @@ private struct MeetingBlock: View {
                         .font(.system(size: 11))
                         .foregroundStyle(UMTheme.muted)
                         .fixedSize()
-                    if avatars, pickIds.allSatisfy({ session.player(for: $0) != nil }) {
+                    let pickPlayers = pickIds.compactMap { session.player(for: $0) }
+                    if !pickPlayers.isEmpty {
                         HStack(spacing: 4) {
-                            ForEach(pickIds, id: \.self) { id in
-                                if let tp = session.player(for: id) {
-                                    UMAvatarView(player: tp, size: 22)
-                                }
+                            ForEach(pickPlayers.prefix(3)) { tp in
+                                rowAvatar(tp)
                             }
                         }
-                    } else {
-                        Text(theirPick)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(UMTheme.roleMention)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        .fixedSize()
+                        .layoutPriority(2)
                     }
+                    rowName(theirPick, color: UMTheme.roleMention)
                 }
                 Spacer(minLength: 0)
             }
@@ -2291,6 +2387,28 @@ private struct MeetingBlock: View {
         .buttonStyle(.plain)
         .disabled(!canTap)
         .accessibilityLabel("\(label), \(count) vote\(count == 1 ? "" : "s")\(theirPick.isEmpty ? "" : ", votes \(theirPick)")\(mine ? ", your vote" : "")")
+    }
+
+    /// Same fixed size for the voter and their target in every row and both layouts; only the
+    /// names give way when space runs out.
+    static let avatarSize: CGFloat = 24
+
+    private func rowAvatar(_ player: GamePlayer) -> some View {
+        UMAvatarView(player: player, size: Self.avatarSize)
+            .frame(width: Self.avatarSize, height: Self.avatarSize)
+            .fixedSize()
+            .layoutPriority(2)
+    }
+
+    /// One line, shrinks to 70% before truncating with an ellipsis.
+    private func rowName(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .truncationMode(.tail)
+            .layoutPriority(1)
     }
 }
 
@@ -2319,5 +2437,24 @@ private extension View {
         #else
         self
         #endif
+    }
+}
+
+/// Settings key and values for the Act tab's Action Layout. Stored values name the layout
+/// ("tabs"/"stack"); the labels are Modern (tabs, default) and Legacy (stack).
+nonisolated enum UMActLayout {
+    static let key = "um.actLayout"
+    static let tabs = "tabs"
+    static let stack = "stack"
+    /// Retired "Vote List Display" (avatars/names); it no longer controls anything.
+    static let retiredKey = "um.voteListDisplay"
+
+    /// Drops the retired key, and any Action Layout value this build doesn't know (including
+    /// "modern"/"legacy" from an unreleased test build), so nobody lands in an unknown layout.
+    static func migrate(_ defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: retiredKey)
+        if let v = defaults.string(forKey: key), v != tabs, v != stack {
+            defaults.removeObject(forKey: key)
+        }
     }
 }

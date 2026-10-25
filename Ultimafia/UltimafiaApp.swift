@@ -10,6 +10,7 @@ struct UltimafiaApp: App {
     init() {
         UMDiag.log("app", "launch \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
         UMDiag.startWatchdog()
+        UMActLayout.migrate()
         #if os(macOS) && !targetEnvironment(macCatalyst) && DEBUG
         let model = _appModel.wrappedValue
         UMMacNativeSnapshot.scheduleIfRequested {

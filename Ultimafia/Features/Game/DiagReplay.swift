@@ -9,7 +9,10 @@ struct DiagReplayView: View {
 
     var body: some View {
         #if os(iOS)
-        if ProcessInfo.processInfo.arguments.contains("-UMDiagTabs") {
+        if ProcessInfo.processInfo.arguments.contains("-UMDiagSettings") {
+            // Settings (You) screen only, scrolled to the Action Layout picker.
+            ProfileView()
+        } else if ProcessInfo.processInfo.arguments.contains("-UMDiagTabs") {
             tabs
         } else {
             standalone
@@ -104,6 +107,40 @@ struct DiagReplayView: View {
         // -UMDiagReplay): a real setup strip, a running clock, and the viewed phase at the start,
         // in the middle (both arrows) or at the newest phase (back arrow only).
         let args = ProcessInfo.processInfo.arguments
+        // `-UMDiagVotes [act|actbottom|chat]` (with -UMDiagReplay): a Day with four actions and long
+        // names for the Act tab and the chat vote log. Server order puts the Gun first; it should
+        // be listed last (true item). `act` opens on Act, `actbottom` also scrolls to the end.
+        if args.contains("-UMDiagVotes") {
+            let names = ["Bartholomew_The_Unrelenting", "x", "MaximilianoGuadalupeRodriguez", "Ann",
+                         "SuperLongUsernameForTesting", "VeryVeryLongNameIndeed123", "Bob", "ChristopherColumbusJr"]
+            var long: [String: Any] = [:]
+            for (i, n) in names.enumerated() {
+                long["p\(i)"] = ["id": "p\(i)", "name": n, "avatar": false, "playerListPosition": i]
+            }
+            s.debugFeed("players", long)
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia",
+                                  "roles": [["Villager:": 4, "Cop:": 1, "Gunsmith:": 1, "Mafioso:": 2]]])
+            s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 2])
+            let ids = (0..<names.count).map { "p\($0)" }
+            s.debugFeed("meeting", ["id": "gun", "name": "Shoot Gun", "actionName": "Shoot", "itemName": "Gun",
+                                    "itemIsTrueItem": true, "voting": true, "amMember": true,
+                                    "targets": ids + ["*"], "votes": [String: Any]()])
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                    "speech": true, "voting": true, "amMember": true, "canTalk": false,
+                                    "targets": ids + ["*"], "votes": [String: Any]()])
+            s.debugFeed("meeting", ["id": "mafia", "name": "Mafia", "actionName": "Mafia Kill", "voting": true,
+                                    "amMember": true, "targets": ids, "votes": ["p4": "p1", "p7": "p2"]])
+            s.debugFeed("meeting", ["id": "cop", "name": "Learn Alignment", "actionName": "Learn Alignment",
+                                    "voting": true, "amMember": true, "targets": ids, "votes": [String: Any]()])
+            for (voter, target) in [("p0", "p5"), ("p1", "p5"), ("p2", "p7"), ("p3", "*"), ("p5", "p2"), ("p6", "p0"), ("p7", "p4")] {
+                s.debugFeed("vote", ["meetingId": "village", "voterId": voter, "target": target])
+            }
+            s.debugFeed("unvote", ["meetingId": "village", "voterId": "p3"])
+            for n in 0..<4 { s.debugFeed("message", msg(n, phase: 2)) }
+            s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+            UMDiag.log("replay", "votes")
+            return
+        }
         if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
             let mode = args[i + 1]
             // `overflow`: a 20-player setup with 16 distinct roles, more than the header can fit.

@@ -14,7 +14,7 @@ struct ProfileView: View {
     @AppStorage("um.hideTerminology") private var hideTerminology = false
     @AppStorage(UMSpeechLM.enabledKey) private var dictationEnabled = false
     @AppStorage("um.playerListSize") private var playerListSize = "compact"
-    @AppStorage("um.voteListDisplay") private var voteListDisplay = "avatars"
+    @AppStorage(UMActLayout.key) private var actLayout = UMActLayout.tabs
     @AppStorage("um.musicVolume") private var musicVolume = 1.0
     @AppStorage("um.sfxVolume") private var sfxVolume = 1.0
     @AppStorage("um.deathSoundVolume") private var deathSoundVolume = 1.0
@@ -31,6 +31,7 @@ struct ProfileView: View {
     var body: some View {
         @Bindable var app = app
         NavigationStack(path: $app.youPath) {
+            ScrollViewReader { proxy in
             List {
                 Section {
                     let me = app.user?.cosmeticPlayer
@@ -232,6 +233,15 @@ struct ProfileView: View {
             } message: {
                 Text("You won't be alerted when a game starts or when you're about to be kicked for inactivity.")
             }
+            #if DEBUG
+            .task {
+                // `-UMDiagSettings` (with -UMDiagReplay): open on the Action Layout picker for screenshots.
+                guard ProcessInfo.processInfo.arguments.contains("-UMDiagSettings") else { return }
+                try? await Task.sleep(for: .milliseconds(600))
+                proxy.scrollTo(UMActLayout.key, anchor: .center)
+            }
+            #endif
+            }
         }
     }
 
@@ -360,8 +370,9 @@ extension ProfileView {
             settingPicker("Player List Size", caption: "Size of the player list on iPad landscape.",
                           selection: $playerListSize, options: [("Compact", "compact"), ("Expanded", "expanded")])
         }
-        settingPicker("Vote List Display", caption: "Show who they vote for as avatars or names.",
-                      selection: $voteListDisplay, options: [("Avatars", "avatars"), ("Names", "names")])
+        settingPicker("Action Layout", caption: "Legacy stacks every action in one scrolling list. Modern switches between actions with tabs.",
+                      selection: $actLayout, options: [("Legacy", UMActLayout.stack), ("Modern", UMActLayout.tabs)])
+            .id(UMActLayout.key)
     }
 
     fileprivate func settingPicker(_ title: String, caption: String, selection: Binding<String>,

@@ -95,6 +95,8 @@ struct VoteMeeting: Identifiable, Hashable {
     var multi: Bool = false
     var members: [VoteMember] = []
     var itemName: String?
+    /// Server `itemIsTrueItem`: web lists these (Gun, Knife, …) after the regular actions.
+    var itemIsTrueItem: Bool = false
     /// Web useAction: instant (unless instantButChangeable) or noUnvote meetings lock after voting.
     var instant: Bool = false
     var instantButChangeable: Bool = false
@@ -1874,6 +1876,7 @@ final class GameSession {
                 multi: boolValue(obj["multi"]),
                 members: memberList,
                 itemName: obj["itemName"] as? String,
+                itemIsTrueItem: boolValue(obj["itemIsTrueItem"]),
                 instant: boolValue(obj["instant"]),
                 instantButChangeable: boolValue(obj["instantButChangeable"]),
                 noUnvote: boolValue(obj["noUnvote"]),
@@ -1973,6 +1976,7 @@ final class GameSession {
                 multi: boolValue(obj["multi"]),
                 members: memberList,
                 itemName: obj["itemName"] as? String,
+                itemIsTrueItem: boolValue(obj["itemIsTrueItem"]),
                 instant: boolValue(obj["instant"]),
                 instantButChangeable: boolValue(obj["instantButChangeable"]),
                 noUnvote: boolValue(obj["noUnvote"]),
