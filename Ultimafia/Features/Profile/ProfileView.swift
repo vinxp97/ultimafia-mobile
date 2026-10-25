@@ -15,6 +15,7 @@ struct ProfileView: View {
     @AppStorage(UMSpeechLM.enabledKey) private var dictationEnabled = false
     @AppStorage("um.playerListSize") private var playerListSize = "compact"
     @AppStorage(UMActLayout.key) private var actLayout = UMActLayout.tabs
+    @AppStorage(UMGameStatusBar.key) private var gameStatusBar = UMGameStatusBar.hide
     @AppStorage("um.musicVolume") private var musicVolume = 1.0
     @AppStorage("um.sfxVolume") private var sfxVolume = 1.0
     @AppStorage("um.deathSoundVolume") private var deathSoundVolume = 1.0
@@ -373,6 +374,13 @@ extension ProfileView {
         settingPicker("Action Layout", caption: "Legacy stacks every action in one scrolling list. Modern switches between actions with tabs.",
                       selection: $actLayout, options: [("Legacy", UMActLayout.stack), ("Modern", UMActLayout.tabs)])
             .id(UMActLayout.key)
+        #if os(iOS)
+        // The Mac (native, or the iPad app on a Mac) has no system status bar to show or hide.
+        if !UMPlatformInfo.isMac {
+            settingPicker("Status Bar", caption: "Show or hide the clock, battery and Wi-Fi while in a game.",
+                          selection: $gameStatusBar, options: [("Hide", UMGameStatusBar.hide), ("Show", UMGameStatusBar.show)])
+        }
+        #endif
     }
 
     fileprivate func settingPicker(_ title: String, caption: String, selection: Binding<String>,
