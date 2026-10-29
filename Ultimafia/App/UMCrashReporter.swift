@@ -21,11 +21,18 @@ nonisolated enum UMCrashStore {
         return url
     }
 
-    /// Newest first.
+    /// Newest first, by the timestamp in the name (crash and hang files interleave by date).
     static func files() -> [URL] {
         let urls = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.creationDateKey], options: [.skipsHiddenFiles])) ?? []
-        return urls.filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+            at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        return urls.filter { $0.pathExtension == "json" }.sorted { sortKey($0) > sortKey($1) }
+    }
+
+    /// `<kind>-<yyyyMMdd-HHmmss>-…` sorts by everything after the kind, so the date leads.
+    static func sortKey(_ url: URL) -> String {
+        let name = url.lastPathComponent
+        guard let dash = name.firstIndex(of: "-") else { return name }
+        return String(name[name.index(after: dash)...])
     }
 
     /// Saves one payload's JSON. Name: `<kind>-<yyyyMMdd-HHmmss>-v<version>-b<build>-<hash>.json`, so
@@ -155,7 +162,10 @@ final class UMCrashReporter {
     }
 
     func reload() {
-        reports = UMCrashStore.files()
+        // Assign only on a change: the Diagnostics section reloads in onAppear, and an unconditional
+        // write re-renders the list, which re-runs onAppear (a loop under VoiceOver / UI tests).
+        let files = UMCrashStore.files()
+        if files != reports { reports = files }
     }
 
     func markAllSeen() {
@@ -214,6 +224,8 @@ final class UMCrashReporter {
     }
 }
 
+#if os(iOS)
+// The prompt and the Diagnostics rows are iPhone / iPad only (MetricKit is not used on the Mac).
 /// "UltiMafia crashed last time" prompt: Share (the JSON files plus a version line) or Not Now.
 /// Either way the reports are marked seen, so it only asks once per report.
 struct UMCrashPromptSheet: View {
@@ -282,6 +294,11 @@ struct UMCrashReportsSection: View {
                 .listRowBackground(UMTheme.card)
                 Button("Clear", role: .destructive) { confirmClear = true }
                     .listRowBackground(UMTheme.card)
+                    // On the button, so the iOS 26 popover points at Clear, not the section.
+                    .confirmationDialog("Delete saved crash reports?", isPresented: $confirmClear, titleVisibility: .visible) {
+                        Button("Delete", role: .destructive) { reporter.clear() }
+                        Button("Cancel", role: .cancel) {}
+                    }
             }
         } header: {
             Text("Diagnostics")
@@ -290,9 +307,6 @@ struct UMCrashReportsSection: View {
         }
         .id("um.crashReports")
         .onAppear { reporter.reload() }
-        .confirmationDialog("Delete saved crash reports?", isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) { reporter.clear() }
-            Button("Cancel", role: .cancel) {}
-        }
     }
 }
+#endif
