@@ -168,6 +168,20 @@ private struct GameScreen: View {
         } message: {
             Text(session.errorMessage ?? "")
         }
+        // Pregame Spectate refused (only player, limit, game starting): the seat is kept.
+        .alert("Can't spectate", isPresented: Binding(
+            get: { session.spectateFailure != nil },
+            set: { if !$0 { session.spectateFailure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(session.spectateFailure ?? "")
+        }
+        // Seat given up: the server dropped this game from the account (redis leaveGame), so the
+        // lobby's "You're in a game" banner and Leave go away.
+        .onChange(of: session.spectate) { _, watching in
+            if watching { Task { await app.refreshUserInfo() } }
+        }
         .onChange(of: session.displaced) { _, displaced in
             if displaced { onDetach() }
         }
@@ -823,8 +837,14 @@ private struct GameChatPane: View {
             // Outside the transcript scroll hierarchy, but floating above its content rather
             // than reserving a separate opaque strip. Only the composer's own controls draw a glass
             // background, so nothing else gains an opaque strip.
-            if session.showComposer {
-                ChatComposer(session: session, draft: $draft, chatFocused: chatFocused)
+            if session.showComposer || session.canSwitchToSpectate {
+                VStack(spacing: 8) {
+                    // Web PregameSeatActions: above the chat box on phones.
+                    if session.canSwitchToSpectate { PregameSpectateBar(session: session) }
+                    if session.showComposer {
+                        ChatComposer(session: session, draft: $draft, chatFocused: chatFocused)
+                    }
+                }
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                         if abs(composerOverlayHeight - height) > 0.25 {
                             composerOverlayHeight = height
@@ -837,7 +857,7 @@ private struct GameChatPane: View {
                     }
             }
         }
-        .onChange(of: session.showComposer) { _, show in
+        .onChange(of: session.showComposer || session.canSwitchToSpectate) { _, show in
             if !show { composerOverlayHeight = 0 }
         }
     }
@@ -2456,5 +2476,38 @@ nonisolated enum UMActLayout {
         if let v = defaults.string(forKey: key), v != tabs, v != stack {
             defaults.removeObject(forKey: key)
         }
+    }
+}
+
+/// Pregame, seated, spectating allowed: give up the seat and watch instead (web "Spectate",
+/// react_main Game.jsx PregameSeatActions; server Player.js `spectate`). No confirmation, as on the web;
+/// the server refuses with a reason when it can't (shown as an alert, seat kept).
+private struct PregameSpectateBar: View {
+    var session: GameSession
+
+    var body: some View {
+        Button {
+            session.switchToSpectate()
+        } label: {
+            HStack(spacing: 8) {
+                if session.spectateRequestPending {
+                    ProgressView().controlSize(.small).tint(UMTheme.blood)
+                } else {
+                    Image(systemName: "eye")
+                }
+                Text("Spectate")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(UMTheme.blood)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(UMTheme.bg.opacity(0.85), in: Capsule())
+            .overlay(Capsule().strokeBorder(UMTheme.blood.opacity(0.8), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(session.spectateRequestPending)
+        .padding(.horizontal, 16)
+        .accessibilityLabel("Spectate")
+        .accessibilityHint("Gives up your seat and watches this game as a spectator.")
     }
 }

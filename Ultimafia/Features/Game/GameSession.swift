@@ -205,7 +205,9 @@ final class GameSession {
     @ObservationIgnored var chatPinnedToBottom = true
     @ObservationIgnored var chatHasOpened = false
     let gameId: String
-    let spectate: Bool
+    /// Watching rather than seated. Starts as the connect mode; the server's `isSpectator` flips it
+    /// (pregame Spectate moves a seated player to spectators on the same socket).
+    private(set) var spectate: Bool
     /// Read-only replay of a finished game from `/game/:id/review/data`: no socket, no sounds.
     let isReview: Bool
     /// Sound/notification side effects are muted while replaying history or reviewing.
@@ -240,6 +242,12 @@ final class GameSession {
     var anonymousDeckIds: [String] = []
     var rankedGame = false
     var competitiveGame = false
+    /// options.spectating: the lobby allows spectators (web shows the pregame Spectate button only then).
+    var spectatingAllowed = false
+    /// "spectate" sent, waiting for `isSpectator` or `spectateFailed`.
+    var spectateRequestPending = false
+    /// Why the server refused a pregame Spectate (`spectateFailed`), shown as an alert; the seat is kept.
+    var spectateFailure: String?
     var graveyardParticipation = false
 
     /// Mirrors web Game.jsx: dialog only when participating in a live (non-pregame/postgame) game.
@@ -1076,6 +1084,21 @@ final class GameSession {
         stop()
     }
 
+    /// Web PregameSeatActions (shared/pregameSeatAction.js): pregame, live, seated, and the lobby
+    /// allows spectating. The server still decides (only-player, limit, tutorial) and answers
+    /// `spectateFailed` with the reason.
+    var canSwitchToSpectate: Bool {
+        !isReview && !spectate && !finished && connected && isPregame && spectatingAllowed
+            && players.contains { $0.id == selfId }
+    }
+
+    /// Give up the seat and watch (server `spectate` event, Player.js; the app's /spectate).
+    func switchToSpectate() {
+        guard canSwitchToSpectate, !spectateRequestPending else { return }
+        spectateRequestPending = true
+        socket.send("spectate")
+    }
+
     func verifyReady() {
         guard needsReadyConfirm else { return }
         socket.send("readyCheck verify")
@@ -1266,6 +1289,8 @@ final class GameSession {
                     anonymousDeckIds = decks.compactMap { ($0 as? [String: Any])?["id"] as? String }
                 }
                 competitiveGame = (o["competitive"] as? Bool) ?? false
+                // Web settingIsTrueValue: true or "true".
+                spectatingAllowed = (o["spectating"] as? Bool) ?? ((o["spectating"] as? String) == "true")
                 graveyardParticipation = (o["graveyardParticipation"] as? Bool) ?? false
             }
         case "setup":
@@ -1364,6 +1389,13 @@ final class GameSession {
             }
         case "error":
             errorMessage = stringValue(data) ?? "Game error"
+        case "isSpectator":
+            // Server: sendSelf on a spectator sends it bare (true); takeSeat sends false.
+            spectateRequestPending = false
+            if !isReview { spectate = (data as? Bool) != false }
+        case "spectateFailed":
+            spectateRequestPending = false
+            spectateFailure = stringValue(data) ?? "You can't move to spectators right now."
         case "banned":
             errorMessage = "Banned from this game."
             weInitiatedLeave = true

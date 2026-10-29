@@ -141,6 +141,41 @@ struct DiagReplayView: View {
             UMDiag.log("replay", "votes")
             return
         }
+        // `-UMDiagSpectate [ok|fail]` (with -UMDiagReplay): a pregame lobby where you hold seat p0
+        // and spectating is on, so the Spectate button shows. Tapping it is answered the way the
+        // server does: `ok` = Game.movePlayerToSpectator (playerLeave, self, isSpectator, players,
+        // alert); `fail` = spectateFromSeat's refusal (`spectateFailed`, seat kept).
+        if let i = args.firstIndex(of: "-UMDiagSpectate") {
+            let mode = args.indices.contains(i + 1) ? args[i + 1] : "ok"
+            s.debugFeed("connected", nil)
+            s.debugFeed("self", "p0")
+            s.debugFeed("isSpectator", false)
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia", "total": 12,
+                                  "roles": [["Villager:": 6, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Mafioso:": 2, "Serial Killer:": 1]]])
+            s.debugFeed("options", ["spectating": true, "ranked": false, "competitive": false])
+            s.debugFeed("timerInfo", ["name": "pregameWait", "delay": 600_000])
+            for n in 0..<6 { s.debugFeed("message", msg(n, phase: -1)) }
+            UMDiag.log("replay", "spectate \(mode)")
+            for _ in 0..<600 {
+                if s.spectateRequestPending { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard s.spectateRequestPending else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            if mode == "fail" {
+                s.debugFeed("spectateFailed", "You are the only player in this game, so you cannot move to spectators. Leave the game instead, or wait for another player to join.")
+                return
+            }
+            s.debugFeed("playerLeave", "p0")
+            s.debugFeed("self", "s0")
+            s.debugFeed("isSpectator", nil)
+            var rest: [String: Any] = [:]
+            for i in 1..<12 { rest["p\(i)"] = players["p\(i)"] }
+            s.debugFeed("players", rest)
+            s.debugFeed("message", ["id": "spec-alert", "senderId": "server", "content": "Player0 is now spectating.",
+                                    "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"])
+            return
+        }
         if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
             let mode = args[i + 1]
             // `overflow`: a 20-player setup with 16 distinct roles, more than the header can fit.
