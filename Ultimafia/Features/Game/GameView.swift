@@ -185,6 +185,29 @@ private struct GameScreen: View {
         } message: {
             Text(session.errorMessage ?? "")
         }
+        // Pregame Spectate refused (only player, limit, game starting): the seat is kept.
+        .alert("Can't spectate", isPresented: Binding(
+            get: { session.spectateFailure != nil },
+            set: { if !$0 { session.spectateFailure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(session.spectateFailure ?? "")
+        }
+        // Join open seat refused (game full, banned, ranked rules...): still spectating.
+        .alert("Can't take a seat", isPresented: Binding(
+            get: { session.takeSeatFailure != nil },
+            set: { if !$0 { session.takeSeatFailure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(session.takeSeatFailure ?? "")
+        }
+        // Seat given up: the server dropped this game from the account (redis leaveGame), so the
+        // lobby's "You're in a game" banner and Leave go away.
+        .onChange(of: session.spectate) { _, watching in
+            if watching { Task { await app.refreshUserInfo() } }
+        }
         .onChange(of: session.displaced) { _, displaced in
             if displaced { onDetach() }
         }
@@ -393,6 +416,9 @@ private struct GameHeader: View {
                 }
                 if !session.isLiarsDice {
                     GlassPhaseNavigator(session: session)
+                        .overlay(alignment: .trailing) { SpectatorCountChip(session: session, glass: true) }
+                } else {
+                    HStack { Spacer(); SpectatorCountChip(session: session, glass: true) }
                 }
             }
         }
@@ -441,6 +467,7 @@ private struct GameHeader: View {
             } else {
                 Spacer(minLength: 8)
             }
+            SpectatorCountChip(session: session, glass: false)
             PhaseTimerBadge(session: session, onTap: scrollChatToTop)
             if showsGuides, showSetupGuides, session.setupId != nil {
                 SetupGuidesButton(session: session, fillsWidth: false)
@@ -601,7 +628,15 @@ private struct GameChatPane: View {
     @State private var paneWidth: CGFloat = 390
 
     private var chatLines: [ChatLine] {
-        session.displayedMessages.filter { showVotingLog || !$0.isVoteLog }
+        let all = session.displayedMessages.filter { showVotingLog || !$0.isVoteLog }
+        guard all.contains(where: { $0.replyTo != nil }) else { return all }
+        var out: [ChatLine] = []
+        out.reserveCapacity(all.count)
+        for (i, line) in all.enumerated() {
+            if line.isQuote, i + 1 < all.count, session.isReply(all[i + 1], toQuote: line) { continue }
+            out.append(line)
+        }
+        return out
     }
 
     /// Every line that has ever been on screen (or was already there when the chat opened).
@@ -648,6 +683,8 @@ private struct GameChatPane: View {
             ScrollView(.vertical) {
                     let lines = chatLines
                     let phase = session.viewingPhaseId
+                    let quotesById = Dictionary(session.displayedMessages.lazy.filter(\.isQuote).map { ($0.id, $0) },
+                                                uniquingKeysWith: { _, b in b })
                     LazyVStack(alignment: .leading, spacing: chatLayout == .compact ? 4 : 2) {
                         Color.clear
                             .frame(height: 1)
@@ -663,7 +700,11 @@ private struct GameChatPane: View {
                                 line: line,
                                 previous: index > 0 ? lines[index - 1] : nil,
                                 session: session,
-                                layout: chatLayout
+                                layout: chatLayout,
+                                replyQuote: line.replyTo.flatMap { r in
+                                    quotesById[r.hasPrefix("quote:") ? r : "quote:" + r]
+                                        ?? session.replyQuote(for: line, in: [])
+                                }
                             )
                             .id(line.id)
                             .onAppear { UMDiag.messageRendered(line.id) }
@@ -764,6 +805,14 @@ private struct GameChatPane: View {
                             .accessibilityLabel(unreadCount > 0 ? "\(unreadCount) unseen messages, scroll to latest" : "Scroll to latest message")
                         }
                 }
+                .onChange(of: session.replyJumpRequest?.tick) { _, _ in
+                    guard let id = session.replyJumpRequest?.id else { return }
+                    Task { @MainActor in
+                        // A phase switch first lays out the other phase's rows.
+                        try? await Task.sleep(for: .milliseconds(60))
+                        withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(id, anchor: .center) }
+                    }
+                }
                 .onChange(of: session.displayedMessages.count) { _, _ in
                     // Phase restoration owns navigation while the rows swap.
                     guard !restoringScroll else { return }
@@ -840,8 +889,15 @@ private struct GameChatPane: View {
             // Outside the transcript scroll hierarchy, but floating above its content rather
             // than reserving a separate opaque strip. Only the composer's own controls draw a glass
             // background, so nothing else gains an opaque strip.
-            if session.showComposer {
-                ChatComposer(session: session, draft: $draft, chatFocused: chatFocused)
+            if session.showComposer || session.canSwitchToSpectate || session.canTakeSeat {
+                VStack(spacing: 8) {
+                    // Web PregameSeatActions: above the chat box on phones.
+                    if session.canSwitchToSpectate { PregameSpectateBar(session: session) }
+                    if session.canTakeSeat { PregameJoinSeatBar(session: session) }
+                    if session.showComposer {
+                        ChatComposer(session: session, draft: $draft, chatFocused: chatFocused)
+                    }
+                }
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                         if abs(composerOverlayHeight - height) > 0.25 {
                             composerOverlayHeight = height
@@ -854,7 +910,7 @@ private struct GameChatPane: View {
                     }
             }
         }
-        .onChange(of: session.showComposer) { _, show in
+        .onChange(of: session.showComposer || session.canSwitchToSpectate) { _, show in
             if !show { composerOverlayHeight = 0 }
         }
     }
@@ -1186,6 +1242,10 @@ private struct ChatComposer: View {
 
     var body: some View {
         VStack(spacing: 0) {
+        if let target = session.replyTarget {
+            ReplyingToBar(target: target, session: session)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
         if let hint = session.slashHint {
             Text(hint)
                 .font(.caption.weight(.semibold))
@@ -1454,14 +1514,20 @@ private struct ChatRow: View {
     var previous: ChatLine?
     var session: GameSession
     var layout: ChatLayout = .standard
+    /// The quote this reply answers (web pairReplies `replyQuote`), if it is loaded.
+    var replyQuote: ChatLine? = nil
+
+    private var isReplyRow: Bool { line.replyTo != nil && !line.isQuote && !line.isServer }
 
     /// "Indent Player Messages": inset only the message text (never the avatar/name header).
     private var textInset: CGFloat { indentUser ? 10 : 0 }
 
     private var grouped: Bool {
         guard layout == .standard else { return false }
-        if line.isQuote { return false }
+        if line.isQuote || isReplyRow { return false }
         guard isPlayerChat(line), let previous, isPlayerChat(previous), !previous.isQuote else { return false }
+        // A spectator line after a town line (or back) starts a new block so its tag shows.
+        guard session.isSpectatorChatLine(line) == session.isSpectatorChatLine(previous) else { return false }
         return previous.senderId == line.senderId
     }
 
@@ -1480,24 +1546,71 @@ private struct ChatRow: View {
             } else if line.isServer {
                 serverRow
             } else if layout == .compact {
-                compactRow(player: player)
+                withReplyReference(compactRow(player: player))
             } else {
-                standardRow(player: player)
+                withReplyReference(standardRow(player: player))
+            }
+        }
+        .background {
+            let flash = session.replyFlashId == line.id
+            let picked = session.replyHighlightId == line.id
+            if flash || picked {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(ReplyStyle.highlight.opacity(flash ? 0.32 : 0.2))
+                    .overlay(alignment: .leading) {
+                        if picked { Rectangle().fill(ReplyStyle.highlight).frame(width: 2) }
+                    }
+                    .padding(.horizontal, -6)
+                    .padding(.vertical, -2)
+                    .transition(.opacity)
+                    .accessibilityIdentifier(picked ? "replyHighlight" : "replyFlash")
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: session.replyFlashId == line.id)
+        .padding(.leading, session.isSpectatorChatLine(line) ? 7 : 0)
+        .overlay(alignment: .leading) {
+            if session.isSpectatorChatLine(line) {
+                Rectangle().fill(SpectatorStyle.border).frame(width: 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: line.senderId == "vote" ? .trailing : .leading)
         .contentShape(Rectangle())
-        .opacity(session.dimsInChat(line) ? 0.35 : (line.isQuote ? 0.9 : 1))
+        .opacity(session.dimsInChat(line) ? 0.35 : (session.isSpectatorChatLine(line) ? 0.85 : (line.isQuote ? 0.9 : 1)))
         .padding(.top, grouped ? 0 : (layout == .standard && isPlayerChat(line) ? 8 : 0))
-        .simultaneousGesture(
-            TapGesture(count: 2).onEnded {
-                // The haptic is the acknowledgement for the gesture, so it fires on the same answer
-                // as the quote itself: a double tap that would do nothing stays silent.
-                guard session.canQuote(line) else { return }
-                UMHaptics.quoteTapped()
-                session.quote(line)
+        // One tap queues a reply after the double-tap window; a second tap inside it quotes (as
+        // before) and the reply bar never shows. A plain tap gesture, not a simultaneous one, so
+        // links, role mentions, avatars and other controls inside the row keep their taps.
+        .onTapGesture {
+            // The haptic is the acknowledgement for the quote: a double tap that would do nothing
+            // stays silent.
+            if session.chatLineTapped(line) == .quoted { UMHaptics.quoteTapped() }
+        }
+    }
+
+    /// A reply row: the Discord-style reference line above the header, and the connector from
+    /// the reply's avatar up to the original sender's tiny avatar, drawn from the laid-out
+    /// avatar frames so it stretches with the row (stickers, wrapped names).
+    @ViewBuilder
+    private func withReplyReference(_ row: some View) -> some View {
+        if isReplyRow {
+            VStack(alignment: .leading, spacing: 3) {
+                ReplyReferenceView(line: line, quote: replyQuote, session: session)
+                    .padding(.leading, layout == .compact ? 66 : 34)
+                row
             }
-        )
+            .overlayPreferenceValue(ReplyAvatarAnchorKey.self) { anchors in
+                GeometryReader { g in
+                    if let main = anchors["main"], let tiny = anchors["tiny"] {
+                        ReplyConnector(from: g[main], to: g[tiny])
+                            .stroke(ReplyStyle.connector, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+        } else {
+            row
+        }
     }
 
     /// Vote text right-aligned with its timestamp at the far right of the same row.
@@ -1551,6 +1664,7 @@ private struct ChatRow: View {
                         square: player?.squareAvatar ?? false,
                         deckPath: player?.deckAvatarPath
                     )
+                    .anchorPreference(key: ReplyAvatarAnchorKey.self, value: .bounds) { ["main": $0] }
                     Group {
                         if let player {
                             HStack(spacing: 0) {
@@ -1560,10 +1674,10 @@ private struct ChatRow: View {
                                         .font(.system(size: 14))
                                         .foregroundStyle(UMTheme.deadName)
                                 }
-                                if session.isSpectatorLine(line) {
-                                    Text(" (spectator)")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(UMTheme.deadName)
+                                if session.isSpectatorChatLine(line) {
+                                    SpectatorChatTag().padding(.leading, 5)
+                                } else if session.isSpectatorSender(line) {
+                                    SpectatorNameMark()
                                 }
                             }
                         } else {
@@ -1668,6 +1782,7 @@ private struct ChatRow: View {
         )
         .offset(y: -1.5)
         .padding(.top, 2)
+        .anchorPreference(key: ReplyAvatarAnchorKey.self, value: .bounds) { ["main": $0] }
 
         if line.isQuote {
             Image(systemName: "quote.opening")
@@ -1687,10 +1802,10 @@ private struct ChatRow: View {
                                         .font(.system(size: 14))
                                         .foregroundStyle(UMTheme.deadName)
                                 }
-                                if session.isSpectatorLine(line) {
-                                    Text(" (spectator)")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(UMTheme.deadName)
+                                if session.isSpectatorChatLine(line) {
+                                    SpectatorChatTag().padding(.leading, 5)
+                                } else if session.isSpectatorSender(line) {
+                                    SpectatorNameMark()
                                 }
                             }
             } else {
@@ -1706,6 +1821,8 @@ private struct ChatRow: View {
                 .foregroundStyle(UMTheme.muted)
                 .fixedSize()
         }
+        // Quote rows show the quote label instead of the name, so the tag goes before the text.
+        if line.isQuote, session.isSpectatorChatLine(line) { SpectatorChatTag() }
 
         EmoteText(
             text: body,
@@ -1728,7 +1845,7 @@ private struct ChatRow: View {
     }
 
     private func chatBodyColor(player: GamePlayer?) -> Color {
-        if session.deadStyled(line) || session.isSpectatorLine(line) { return .red }
+        if session.deadStyled(line) { return .red }
         return player?.bodyColor ?? .white
     }
 
@@ -1796,22 +1913,28 @@ private struct GameTownPane: View {
                     }
                 }
             }
-            if !session.spectatorList.isEmpty, !session.isReview {
-                Section("Spectators") {
-                    ForEach(session.spectatorList) { spectator in
+            if session.showsSpectatorList, !session.watchingSpectators.isEmpty {
+                Section {
+                    ForEach(session.watchingSpectators) { spectator in
                         HStack(spacing: dim(8, 6, 8)) {
                             UMAvatarView(userId: spectator.userId, hasAvatar: spectator.avatar,
                                          name: spectator.name, size: dim(24, 18, 32), square: spectator.squareAvatar)
                             PlayerNameView(player: spectator, fontSize: dim(14, 12, 16), dead: false)
                                 .lineLimit(1)
-                            Text("(spectator)")
-                                .font(.system(size: dim(13, 11, 14)))
-                                .foregroundStyle(UMTheme.deadName)
-                                .lineLimit(1)
-                                .fixedSize()
+                            if spectator.id == session.selfId {
+                                Text("(you)")
+                                    .font(.system(size: dim(13, 11, 14)))
+                                    .foregroundStyle(UMTheme.muted)
+                                    .fixedSize()
+                            }
                         }
                         .modifier(CompactTownRow(on: compact, pad: expanded ? 6 : 3))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("spectatorRow")
                     }
+                } header: {
+                    Label("Spectators", systemImage: "eye")
+                        .accessibilityIdentifier("spectatorsHeader")
                 }
             }
         }
@@ -2481,4 +2604,327 @@ nonisolated enum UMGameStatusBar {
     static let key = "um.gameStatusBar"
     static let hide = "hide"
     static let show = "show"
+}
+
+/// Pregame, seated, spectating allowed: give up the seat and watch instead (web "Spectate",
+/// react_main Game.jsx PregameSeatActions; server Player.js `spectate`). No confirmation, as on the web;
+/// the server refuses with a reason when it can't (shown as an alert, seat kept).
+private struct PregameSpectateBar: View {
+    var session: GameSession
+
+    var body: some View {
+        Button {
+            session.switchToSpectate()
+        } label: {
+            HStack(spacing: 8) {
+                if session.spectateRequestPending {
+                    ProgressView().controlSize(.small).tint(UMTheme.blood)
+                } else {
+                    Image(systemName: "eye")
+                }
+                Text("Spectate")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(UMTheme.blood)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(UMTheme.bg.opacity(0.85), in: Capsule())
+            .overlay(Capsule().strokeBorder(UMTheme.blood.opacity(0.8), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(session.spectateRequestPending)
+        .padding(.horizontal, 16)
+        .accessibilityLabel("Spectate")
+        .accessibilityHint("Gives up your seat and watches this game as a spectator.")
+    }
+}
+
+/// Web game.css .spectator-message / .spectator-tag colours.
+enum SpectatorStyle {
+    static let border = Color(white: 0.55).opacity(0.7)
+    static let pill = Color(white: 0.5).opacity(0.28)
+    static let text = Color(white: 0.78)
+}
+
+/// Spectator Meeting line tag (web Game.jsx "Spectator" chip before the text).
+private struct SpectatorChatTag: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "eye")
+                .font(.system(size: 9, weight: .semibold))
+            Text("Spectator")
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(SpectatorStyle.text)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(SpectatorStyle.pill, in: Capsule())
+        .fixedSize()
+        .padding(.top, 1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Spectator")
+        .accessibilityIdentifier("spectatorTag")
+    }
+}
+
+/// Eye next to a spectator's name on lines outside the Spectator Meeting (pregame chat).
+private struct SpectatorNameMark: View {
+    var body: some View {
+        Image(systemName: "eye")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(SpectatorStyle.text)
+            .padding(.leading, 4)
+            .accessibilityLabel("spectator")
+            .accessibilityIdentifier("spectatorNameMark")
+    }
+}
+
+/// Header eye chip (web PlayerCount in the game top bar): eye + spectator count when the lobby
+/// allows spectating, eye-slash when it doesn't. "Dev view" for omniscient spectators.
+private struct SpectatorCountChip: View {
+    var session: GameSession
+    var glass: Bool
+
+    var body: some View {
+        if !session.isReview {
+            HStack(spacing: 4) {
+                if session.spectatingAllowed {
+                    Image(systemName: "eye")
+                    Text("\(session.spectatorCount ?? session.spectatorList.count)")
+                        .monospacedDigit()
+                } else {
+                    Image(systemName: "eye.slash")
+                }
+                if session.omniscientSpectator {
+                    Text("Dev view").fontWeight(.semibold)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(UMTheme.muted)
+            .padding(.horizontal, glass ? 9 : 0)
+            .frame(height: glass ? 30 : nil)
+            .modifier(SpectatorChipGlass(on: glass))
+            .fixedSize()
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(session.spectatingAllowed
+                ? "\(session.spectatorCount ?? session.spectatorList.count) spectators"
+                : "Spectating off")
+            .accessibilityIdentifier("spectatorCount")
+        }
+    }
+}
+
+private struct SpectatorChipGlass: ViewModifier {
+    var on: Bool
+    func body(content: Content) -> some View {
+        if on { content.glassEffect(.regular, in: .capsule) } else { content }
+    }
+}
+
+/// Spectator on the live pregame: take an open seat (web PregameSeatActions "Join",
+/// server Spectator.js `takeSeat`; refusals come back as `takeSeatFailed`).
+private struct PregameJoinSeatBar: View {
+    var session: GameSession
+
+    var body: some View {
+        Button {
+            session.takeSeat()
+        } label: {
+            HStack(spacing: 8) {
+                if session.takeSeatPending {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: "person.crop.circle.badge.plus")
+                }
+                Text("Join open seat")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(UMTheme.blood, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(session.takeSeatPending)
+        .padding(.horizontal, 16)
+        .accessibilityLabel("Join open seat")
+        .accessibilityHint("Leaves the spectators and takes a free seat in this game.")
+    }
+}
+
+// MARK: Replies (web messageReply.js / Game.jsx ReplyReference, Discord style)
+
+enum ReplyStyle {
+    /// Web .reply-jump-highlight rgba(88, 101, 242).
+    static let highlight = Color(red: 88 / 255, green: 101 / 255, blue: 242 / 255)
+    static let connector = Color.white.opacity(0.35)
+}
+
+struct ReplyAvatarAnchorKey: PreferenceKey {
+    static let defaultValue: [String: Anchor<CGRect>] = [:]
+    static func reduce(value: inout [String: Anchor<CGRect>], nextValue: () -> [String: Anchor<CGRect>]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// From the top of the reply's avatar, up its centre line, a rounded corner, then right to just
+/// before the original sender's tiny avatar. Both ends come from the laid-out frames, so the
+/// line is as tall as the gap between them, however tall the reference or header gets.
+struct ReplyConnector: Shape {
+    var from: CGRect
+    var to: CGRect
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let x = from.midX
+        let bottom = from.minY - 2
+        let y = to.midY
+        let end = to.minX - 4
+        guard bottom > y, end > x else { return p }
+        let r = min(6, bottom - y, end - x)
+        p.move(to: CGPoint(x: x, y: bottom))
+        p.addLine(to: CGPoint(x: x, y: y + r))
+        p.addQuadCurve(to: CGPoint(x: x + r, y: y), control: CGPoint(x: x, y: y))
+        p.addLine(to: CGPoint(x: end, y: y))
+        return p
+    }
+}
+
+/// The line above a reply: the original sender's tiny avatar, their name in their own name
+/// colour and font, and one dimmed line of what they said with their text colour and emotes.
+/// Tap jumps to the original and flashes it. Without the quote: "Original message not loaded".
+private struct ReplyReferenceView: View {
+    let line: ChatLine
+    let quote: ChatLine?
+    var session: GameSession
+
+    private var original: ChatLine? {
+        quote?.quotedMessageId.flatMap { session.findOriginalLine($0) }
+    }
+
+    var body: some View {
+        if let quote {
+            let original = self.original
+            let senderId = original?.senderId ?? quote.quotedSenderId ?? "anonymous"
+            let player = senderId == "anonymous" ? nil : session.player(for: senderId)
+            let content = original?.content ?? quote.content
+            let me = content.hasPrefix("/me ")
+            let text = me ? String(content.dropFirst(4)) : content
+            Button {
+                if let original { session.jumpToReplyOriginal(original) }
+            } label: {
+                HStack(alignment: .top, spacing: 4) {
+                    UMAvatarView(
+                        userId: player?.userId,
+                        hasAvatar: player?.avatar ?? false,
+                        name: player?.name ?? "Anonymous",
+                        size: 16,
+                        square: player?.squareAvatar ?? false,
+                        deckPath: player?.deckAvatarPath
+                    )
+                    .anchorPreference(key: ReplyAvatarAnchorKey.self, value: .bounds) { ["tiny": $0] }
+                    Group {
+                        if let player {
+                            PlayerNameView(player: player, fontSize: 12, dead: original.map { session.deadStyled($0) } ?? false)
+                        } else {
+                            Text(quote.quotedSenderName ?? "Anonymous")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .lineLimit(1)
+                    .fixedSize()
+                    .opacity(0.9)
+                    EmoteText(
+                        text: text,
+                        color: player?.bodyColor ?? .white,
+                        italic: me,
+                        customEmotes: player?.customEmotes ?? original?.customEmotes ?? quote.customEmotes,
+                        customStickers: player?.customStickers ?? original?.customStickers ?? quote.customStickers,
+                        system: false,
+                        emoteSize: 16,
+                        players: session.players,
+                        gameType: session.setupGameType,
+                        otherRoles: session.guessableRoles.map(\.raw),
+                        textFont: .system(size: 13)
+                    )
+                    // One line, as on Discord: laid out unwrapped, then cut at the row's edge with a
+                    // short fade (a sticker keeps its height, so the row and connector grow with it).
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .mask(LinearGradient(stops: [.init(color: .black, location: 0.9), .init(color: .clear, location: 1)],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .clipped()
+                    .opacity(0.7)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(original == nil)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Replying to \(player?.name ?? quote.quotedSenderName ?? "Anonymous"): \(content)")
+            .accessibilityIdentifier("replyReference")
+        } else {
+            HStack(spacing: 4) {
+                Image(systemName: "arrowshape.turn.up.left.fill")
+                    .font(.system(size: 9))
+                    .frame(width: 16, height: 16)
+                    .background(Color.white.opacity(0.12), in: Circle())
+                    .anchorPreference(key: ReplyAvatarAnchorKey.self, value: .bounds) { ["tiny": $0] }
+                Text("Original message not loaded")
+                    .font(.system(size: 12).italic())
+            }
+            .foregroundStyle(UMTheme.muted)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("replyReferenceMissing")
+        }
+    }
+}
+
+/// Above the chat box (and the emote / name suggestions): who you're replying to, with an X.
+private struct ReplyingToBar: View {
+    let target: ChatLine
+    var session: GameSession
+
+    var body: some View {
+        let player = target.senderId == "anonymous" ? nil : session.player(for: target.senderId)
+        HStack(spacing: 6) {
+            Image(systemName: "arrowshape.turn.up.left.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(UMTheme.muted)
+            Text("Replying to")
+                .font(.footnote)
+                .foregroundStyle(UMTheme.muted)
+            Group {
+                if let player {
+                    PlayerNameView(player: player, fontSize: 13, dead: false)
+                } else {
+                    Text(target.senderId == "anonymous" ? "Anonymous" : target.senderName)
+                        .font(.footnote.weight(.semibold))
+                }
+            }
+            .lineLimit(1)
+            Spacer(minLength: 4)
+            Button {
+                session.cancelReply()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 18))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel reply")
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
+        .frame(height: 34)
+        .background(UMTheme.elevated)
+        .overlay(alignment: .top) { Rectangle().fill(UMTheme.line).frame(height: 0.5) }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("replyingToBar")
+    }
 }

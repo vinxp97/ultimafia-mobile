@@ -66,6 +66,8 @@ struct ChatLine: Identifiable, Hashable {
     /// Message carried its own `alive` flag (so senderWasDead isn't a fallback guess).
     var aliveFlagKnown: Bool = false
     var newspaper: NewspaperIssue? = nil
+    /// Reply: id of the quote the server posted just before this line (Message.js `replyTo`).
+    var replyTo: String? = nil
 
     var isVoteLog: Bool { senderId == "vote" || id.hasPrefix("votehist:") }
 }
@@ -205,7 +207,9 @@ final class GameSession {
     @ObservationIgnored var chatPinnedToBottom = true
     @ObservationIgnored var chatHasOpened = false
     let gameId: String
-    let spectate: Bool
+    /// Watching rather than seated. Starts as the connect mode; the server's `isSpectator` flips it
+    /// (pregame Spectate moves a seated player to spectators on the same socket).
+    private(set) var spectate: Bool
     /// Read-only replay of a finished game from `/game/:id/review/data`: no socket, no sounds.
     let isReview: Bool
     /// Sound/notification side effects are muted while replaying history or reviewing.
@@ -240,6 +244,20 @@ final class GameSession {
     var anonymousDeckIds: [String] = []
     var rankedGame = false
     var competitiveGame = false
+    /// options.spectating: the lobby allows spectators (web shows the pregame Spectate button only then).
+    var spectatingAllowed = false
+    /// "spectate" sent, waiting for `isSpectator` or `spectateFailed`.
+    var spectateRequestPending = false
+    /// Why the server refused a pregame Spectate (`spectateFailed`), shown as an alert; the seat is kept.
+    var spectateFailure: String?
+    /// "takeSeat" sent from the pregame Join bar, waiting for `isSpectator` false or `takeSeatFailed`.
+    var takeSeatPending = false
+    /// Why the server refused Join open seat (`takeSeatFailed`), shown as an alert.
+    var takeSeatFailure: String?
+    /// Server `spectatorCount` broadcast (Game.js broadcastSpectators / player join); header eye chip.
+    var spectatorCount: Int?
+    /// Server `omniscientSpectator` (dev / omniscient spectate): sees every meeting. Header "Dev view".
+    var omniscientSpectator = false
     var graveyardParticipation = false
 
     /// Mirrors web Game.jsx: dialog only when participating in a live (non-pregame/postgame) game.
@@ -460,15 +478,36 @@ final class GameSession {
         if isSpeakCoolingDown {
             return "Please do not spam! \(speakCooldownSecondsLeft)s"
         }
+        if speakTargetIsSpectatorChat { return "Say to spectators…" }
         let extra = currentSpeechOption.placeholder
         if extra.isEmpty { return "Say…" }
         return "Say \(extra)…"
     }
 
     var showComposer: Bool {
-        // Spectators may only talk in the Spectator Meeting (server Spectator.js "speak"); canTalk encodes that.
+        // Spectators talk in Pregame before the start and in the Spectator Meeting (Spectator.js
+        // canSpeakIn); canTalk encodes that. No spectator chat once the game is over.
         guard !isReview, isViewingLive else { return false }
+        if spectate && (finished || currentPhaseId == -2) { return false }
         return canTalk || speechChannels.contains(where: { $0.canTalk }) || isDraftOnly
+    }
+
+    /// Spectator.canSpeakIn: the Spectator Meeting, or Pregame while the game hasn't started.
+    nonisolated static func spectatorMayTalk(in meetingName: String, pregame: Bool) -> Bool {
+        meetingName == "Spectator Meeting" || (meetingName == "Pregame" && pregame)
+    }
+
+    /// The meeting `speak` would send to right now (selected channel if you can talk there, else
+    /// the first one you can talk in).
+    var speakTargetId: String? {
+        speechChannels.first(where: { $0.id == selectedSpeechMeetingId && $0.canTalk })?.id
+            ?? speechChannels.first(where: { $0.canTalk })?.id
+    }
+
+    /// Composer target is the Spectator Meeting (web placeholder "Say to spectators...").
+    var speakTargetIsSpectatorChat: Bool {
+        guard spectate, let id = speakTargetId else { return false }
+        return spectatorMeetingIds.contains(id)
     }
 
     /// Seated player in a running game with no meeting they can speak in right now (e.g. town at
@@ -909,14 +948,36 @@ final class GameSession {
             typingSuppressed = false
             slashHint = nil
         }
-        let selected = speechChannels.first(where: { $0.id == selectedSpeechMeetingId && $0.canTalk })?.id
-        let meetingId = selected
-            ?? speechChannels.first(where: { $0.canTalk })?.id
+        if spectate && (finished || currentPhaseId == -2) { return false }
+        // Spectators only ever send to a meeting they can speak in (Spectator.canSpeakIn).
+        let meetingId = spectate ? speakTargetId : (speakTargetId
             ?? selectedSpeechMeetingId
             ?? speechChannels.first?.id
-            ?? lastTalkMeetingId
+            ?? lastTalkMeetingId)
         guard let meetingId else { return false }
         lastTalkMeetingId = meetingId
+        // A queued reply goes out as the web's "reply" event (messageReply.js buildReplyPayload):
+        // not for speech abilities (whispers) or commands; the server posts the quote, then the line.
+        if let target = replyTarget, currentSpeechOption.abilityName == nil,
+           !trimmed.hasPrefix("/") || trimmed.hasPrefix("/me ") {
+            let payload: [String: Any] = [
+                "quote": [
+                    "messageId": target.id,
+                    "toMeetingId": meetingId,
+                    "fromMeetingId": target.meetingId ?? meetingId,
+                    "fromState": target.fromState ?? viewingPhaseId,
+                    "messageContent": target.content,
+                ] as [String: Any],
+                "message": ["content": trimmed, "meetingId": meetingId],
+            ]
+            socket.send("reply", object: payload)
+            #if DEBUG
+            debugSendHook?("reply", payload)
+            #endif
+            cancelReply()
+            stopTyping()
+            return true
+        }
         var payload: [String: Any] = [
             "content": trimmed,
             "meetingId": meetingId,
@@ -929,6 +990,9 @@ final class GameSession {
             if name == "Whisper" && whisperForceLeak { payload["forceLeak"] = true }
         }
         socket.send("speak", object: payload)
+        #if DEBUG
+        debugSendHook?("speak", payload)
+        #endif
         stopTyping()
         return true
     }
@@ -989,7 +1053,100 @@ final class GameSession {
     /// Whether a double tap would actually quote this line. The haptic fires on the same answer, so
     /// a tap that would do nothing stays silent.
     func canQuote(_ line: ChatLine) -> Bool {
-        !spectate && !line.isServer && !line.isQuote && line.quotable
+        guard !line.isServer, !line.isQuote, line.quotable else { return false }
+        // Spectators quote into a meeting they can speak in (Spectator.js "quote" -> canSpeakIn).
+        if spectate { return showComposer && speakTargetId != nil }
+        return true
+    }
+
+    // MARK: Replies (web messageReply.js)
+
+    /// Queued reply target ("Replying to Name" bar above the composer).
+    var replyTarget: ChatLine?
+    /// Line highlighted for a reply: tapped (waiting out the double-tap window) or queued.
+    var replyHighlightId: String?
+    /// Original line flashed after tapping a reply's reference, and the jump request for the view.
+    var replyFlashId: String?
+    var replyJumpRequest: (id: String, tick: Int)?
+    @ObservationIgnored private var replyTapTask: Task<Void, Never>?
+    @ObservationIgnored private var lastChatTap: (id: String, at: Date)?
+    @ObservationIgnored private var replyFlashTask: Task<Void, Never>?
+    /// Same window as a double tap: a second tap inside it quotes instead of replying.
+    nonisolated static let doubleTapWindow: TimeInterval = 0.3
+
+    /// Web canReplyTo: the double-click quoting rule, and only where you can speak.
+    func canReplyTo(_ line: ChatLine) -> Bool {
+        canQuote(line) && showComposer && !isDraftOnly && line.meetingId != nil && viewingPhaseId >= -1
+    }
+
+    enum ChatTapResult { case none, pendingReply, quoted }
+
+    /// One tap on a chat line. The first tap highlights the line and, if no second tap follows
+    /// within the double-tap window, queues a reply. A second tap on the same line inside the
+    /// window is a double tap: the pending reply is dropped (bar never shown) and the line is quoted.
+    @discardableResult
+    func chatLineTapped(_ line: ChatLine, at now: Date = Date()) -> ChatTapResult {
+        if let last = lastChatTap, last.id == line.id, now.timeIntervalSince(last.at) < Self.doubleTapWindow {
+            lastChatTap = nil
+            replyTapTask?.cancel()
+            replyTapTask = nil
+            replyHighlightId = replyTarget?.id
+            guard canQuote(line) else { return .none }
+            quote(line)
+            return .quoted
+        }
+        lastChatTap = (line.id, now)
+        guard canReplyTo(line) else { return .none }
+        replyTapTask?.cancel()
+        replyHighlightId = line.id
+        replyTapTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.doubleTapWindow))
+            guard !Task.isCancelled, let self else { return }
+            self.replyTarget = line
+            self.replyHighlightId = line.id
+            self.replyTapTask = nil
+        }
+        return .pendingReply
+    }
+
+    func cancelReply() {
+        replyTapTask?.cancel()
+        replyTapTask = nil
+        replyTarget = nil
+        replyHighlightId = nil
+    }
+
+    /// The quote a reply line answers ("quote:<id>" in this app's ids).
+    func replyQuote(for line: ChatLine, in lines: [ChatLine]) -> ChatLine? {
+        guard let r = line.replyTo else { return nil }
+        let qid = r.hasPrefix("quote:") ? r : "quote:\(r)"
+        return lines.last(where: { $0.isQuote && $0.id == qid })
+            ?? messages.last(where: { $0.isQuote && $0.id == qid })
+            ?? phases.lazy.compactMap { $0.messages.last(where: { $0.isQuote && $0.id == qid }) }.first
+    }
+
+    /// Web isReplyToQuote: same sender, same meeting.
+    func isReply(_ line: ChatLine, toQuote quote: ChatLine) -> Bool {
+        guard quote.isQuote, !line.isQuote, let r = line.replyTo else { return false }
+        let qid = r.hasPrefix("quote:") ? r : "quote:\(r)"
+        return quote.id == qid && quote.senderId == line.senderId
+            && (line.meetingId == nil || quote.meetingId == nil || line.meetingId == quote.meetingId)
+    }
+
+    /// Scroll to the original line (switching phase if it's in another one) and flash it.
+    func jumpToReplyOriginal(_ original: ChatLine) {
+        if let phase = phases.first(where: { $0.messages.contains { $0.id == original.id } })?.id,
+           phase != viewingPhaseId, !isLiarsDice {
+            viewPhase(phase)
+        }
+        replyJumpRequest = (original.id, (replyJumpRequest?.tick ?? 0) + 1)
+        replyFlashTask?.cancel()
+        replyFlashId = original.id
+        replyFlashTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            self?.replyFlashId = nil
+        }
     }
 
     func quote(_ line: ChatLine) {
@@ -997,7 +1154,8 @@ final class GameSession {
         if !isViewingLive {
             viewLivePhase()
         }
-        let to = selectedSpeechMeetingId
+        let to = (spectate ? speakTargetId : nil)
+            ?? selectedSpeechMeetingId
             ?? speechChannels.first(where: { $0.canTalk })?.id
             ?? speechChannels.first?.id
             ?? line.meetingId
@@ -1010,6 +1168,9 @@ final class GameSession {
             "messageContent": line.content,
         ]
         socket.send("quote", object: payload)
+        #if DEBUG
+        debugSendHook?("quote", payload)
+        #endif
     }
 
     func viewPhase(_ id: Int) {
@@ -1076,6 +1237,36 @@ final class GameSession {
         stop()
     }
 
+    /// Web PregameSeatActions (shared/pregameSeatAction.js): pregame, live, seated, and the lobby
+    /// allows spectating. The server still decides (only-player, limit, tutorial) and answers
+    /// `spectateFailed` with the reason.
+    var canSwitchToSpectate: Bool {
+        !isReview && !spectate && !finished && connected && isPregame && spectatingAllowed
+            && players.contains { $0.id == selfId }
+    }
+
+    /// Web pregameSeatAction "join": a spectator on the live pregame (server takeSeat checks for a
+    /// free seat, bans, ranked rules and answers `takeSeatFailed` with the reason).
+    var canTakeSeat: Bool {
+        !isReview && spectate && !finished && connected && isPregame
+    }
+
+    func takeSeat() {
+        guard canTakeSeat, !takeSeatPending else { return }
+        takeSeatPending = true
+        socket.send("takeSeat")
+        #if DEBUG
+        debugSendHook?("takeSeat", [:])
+        #endif
+    }
+
+    /// Give up the seat and watch (server `spectate` event, Player.js; the app's /spectate).
+    func switchToSpectate() {
+        guard canSwitchToSpectate, !spectateRequestPending else { return }
+        spectateRequestPending = true
+        socket.send("spectate")
+    }
+
     func verifyReady() {
         guard needsReadyConfirm else { return }
         socket.send("readyCheck verify")
@@ -1124,11 +1315,35 @@ final class GameSession {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    /// Seat ids the server marks `watching: false` (pregame-only speakers; getSpectatorInfoFor).
+    @ObservationIgnored private var notWatchingIds: Set<String> = []
+
+    /// Watching spectators for the Spectators list (web pregameSpectatorList filters `watching`).
+    var watchingSpectators: [GamePlayer] {
+        spectatorList.filter { !notWatchingIds.contains($0.id) }
+    }
+
+    /// Web pregameSpectatorList: spectators always see the list; players only on the live pregame.
+    var showsSpectatorList: Bool {
+        guard !isReview else { return false }
+        return spectate || (currentPhaseId == -1 && viewingPhaseId == -1)
+    }
+
+    /// Line in a Spectator Meeting (web mergeSpectatorChat): tagged "Spectator", grey border, dimmed.
+    func isSpectatorChatLine(_ line: ChatLine) -> Bool {
+        guard !line.isServer, let m = line.meetingId else { return false }
+        return spectatorMeetingIds.contains(m)
+    }
+
+    /// Written by a spectator seat (e.g. pregame chat): eye next to the name, no tag.
+    func isSpectatorSender(_ line: ChatLine) -> Bool {
+        guard !line.isServer, !line.isQuote else { return false }
+        return spectatorPlayers[line.senderId] != nil && !players.contains { $0.id == line.senderId }
+    }
+
     /// Line written by a spectator (in the Spectator Meeting, or by a known spectator seat).
     func isSpectatorLine(_ line: ChatLine) -> Bool {
-        guard !line.isServer, !line.isQuote else { return false }
-        if let m = line.meetingId, spectatorMeetingIds.contains(m) { return true }
-        return spectatorPlayers[line.senderId] != nil && !players.contains { $0.id == line.senderId }
+        isSpectatorChatLine(line) || isSpectatorSender(line)
     }
 
     private func applyIncomingTyping(_ data: Any?) {
@@ -1233,6 +1448,8 @@ final class GameSession {
     #if DEBUG
     /// DiagReplay: feed a synthetic socket event through the real handler.
     func debugFeed(_ event: String, _ data: Any?) { handle(event, data) }
+    /// DiagReplay: sees what speak / quote / takeSeat would send, to fake the server's answer.
+    @ObservationIgnored var debugSendHook: ((String, [String: Any]) -> Void)?
     #endif
 
     private func handle(_ event: String, _ data: Any?) {
@@ -1266,6 +1483,8 @@ final class GameSession {
                     anonymousDeckIds = decks.compactMap { ($0 as? [String: Any])?["id"] as? String }
                 }
                 competitiveGame = (o["competitive"] as? Bool) ?? false
+                // Web settingIsTrueValue: true or "true".
+                spectatingAllowed = (o["spectating"] as? Bool) ?? ((o["spectating"] as? String) == "true")
                 graveyardParticipation = (o["graveyardParticipation"] as? Bool) ?? false
             }
         case "setup":
@@ -1282,8 +1501,23 @@ final class GameSession {
                 next[p.id] = p
                 order.append(p.id)
             }
+            var notWatching: Set<String> = []
+            if let obj = data as? [String: Any] {
+                for (id, v) in obj {
+                    if let info = v as? [String: Any], let w = info["watching"] as? Bool, !w { notWatching.insert(id) }
+                }
+            }
+            notWatchingIds = notWatching
             spectatorOrder = order
             spectatorPlayers = next
+        case "spectatorCount":
+            if let n = intValue(data) { spectatorCount = max(0, n) }
+        case "omniscientSpectator":
+            omniscientSpectator = true
+        case "takeSeatFailed":
+            takeSeatPending = false
+            takeSeatFailure = stringValue(data) ?? "You can't take a seat right now."
+
         case "playerJoin":
             if let p = parsePlayer(data) {
                 formerPlayerIds.insert(p.id)
@@ -1364,6 +1598,15 @@ final class GameSession {
             }
         case "error":
             errorMessage = stringValue(data) ?? "Game error"
+        case "isSpectator":
+            // Server: sendSelf on a spectator sends it bare (true); takeSeat sends false.
+            spectateRequestPending = false
+            takeSeatPending = false
+            if !isReview { spectate = (data as? Bool) != false }
+            if !spectate { omniscientSpectator = false }
+        case "spectateFailed":
+            spectateRequestPending = false
+            spectateFailure = stringValue(data) ?? "You can't move to spectators right now."
         case "banned":
             errorMessage = "Banned from this game."
             weInitiatedLeave = true
@@ -1487,8 +1730,9 @@ final class GameSession {
                     phases[i].meetings = extractVoteMeetings(from: meetings)
                 }
                 var quotes: [Any] = []
-                for (_, mval) in meetings {
+                for (mid, mval) in meetings {
                     guard let meeting = mval as? [String: Any] else { continue }
+                    if (meeting["name"] as? String) == "Spectator Meeting" { spectatorMeetingIds.insert(mid) }
                     if let msgs = meeting["messages"] as? [Any] {
                         for msg in msgs {
                             if boolValue((msg as? [String: Any])?["isQuote"]) {
@@ -1774,7 +2018,8 @@ final class GameSession {
             quotable: !isQuote && senderId != "server" && senderId != "vote",
             fromState: intValue(obj["fromState"]),
             senderWasDead: deadWhenSent(senderId: senderId, alive: obj["alive"]),
-            aliveFlagKnown: !(obj["alive"] == nil || obj["alive"] is NSNull)
+            aliveFlagKnown: !(obj["alive"] == nil || obj["alive"] is NSNull),
+            replyTo: isQuote ? nil : stringValue(obj["replyTo"]).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -1817,10 +2062,11 @@ final class GameSession {
                 let amMember = obj["amMember"] as? Bool ?? true
                 let can = obj["canTalk"] as? Bool ?? true
                 let abilities = parseAbilities(obj["speechAbilities"])
+                let meetingName = (obj["name"] as? String) ?? "Chat"
                 let channel = SpeechChannel(
                     id: id,
-                    name: (obj["name"] as? String) ?? "Chat",
-                    canTalk: can && amMember && (!spectate || (obj["name"] as? String) == "Spectator Meeting"),
+                    name: meetingName,
+                    canTalk: can && amMember && (!spectate || Self.spectatorMayTalk(in: meetingName, pregame: isPregame)),
                     abilities: abilities
                 )
                 nextSpeech.removeAll { $0.id == id }
@@ -2296,7 +2542,7 @@ final class GameSession {
         return r.contains("mafia") || r.contains("goon") || r.contains("cult") || r == "mafioso"
     }
 
-    private func findOriginalLine(_ id: String) -> ChatLine? {
+    func findOriginalLine(_ id: String) -> ChatLine? {
         if let line = ingestBuffer.first(where: { $0.id == id && !$0.isQuote }) { return line }
         if let line = messages.first(where: { $0.id == id && !$0.isQuote }) { return line }
         for phase in phases {
@@ -2348,7 +2594,7 @@ final class GameSession {
         let quoterName: String
         if quoterId == "anonymous" {
             quoterName = "Anonymous"
-        } else if let p = players.first(where: { $0.id == quoterId }) {
+        } else if let p = player(for: quoterId) {
             quoterName = p.name
         } else {
             quoterName = (obj["senderName"] as? String) ?? "Player"
@@ -2360,7 +2606,7 @@ final class GameSession {
         } else if quotedId == "anonymous" {
             quotedName = "Anonymous"
         } else {
-            quotedName = players.first(where: { $0.id == quotedId })?.name ?? "Anonymous"
+            quotedName = player(for: quotedId)?.name ?? "Anonymous"
         }
         let senderId = quoterId
         let name = quoterName
