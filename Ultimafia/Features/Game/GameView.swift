@@ -66,6 +66,9 @@ private struct GameScreen: View {
     /// The game screen hides the status bar only while it is the screen on show; any other tab,
     /// a pushed profile or the lobby gets it back.
     @State private var isOnScreen = false
+    /// Settings > Status Bar: "hide" (default) keeps the game full-bleed; "show" keeps the clock,
+    /// battery and Wi-Fi visible in game (the floating header sits below them in the safe area).
+    @AppStorage(UMGameStatusBar.key) private var statusBarPref = UMGameStatusBar.hide
 
     var body: some View {
         GeometryReader { geo in
@@ -156,8 +159,22 @@ private struct GameScreen: View {
         .background(UMTheme.bg.ignoresSafeArea())
         .background { gameShortcuts }
         #if os(iOS)
-        // iPhone / iPad: the game is full-bleed; the clock and battery come back everywhere else.
-        .statusBarHidden(isOnScreen)
+        // iPhone / iPad: the game is full-bleed unless Status Bar is set to Show; the clock and
+        // battery come back everywhere else either way.
+        .statusBarHidden(isOnScreen && statusBarPref != UMGameStatusBar.show)
+        // Shown: a solid strip behind the clock and battery, so chat scrolling under the floating
+        // header never runs through them. Drawn up from the safe-area edge, inset-high.
+        .overlay(alignment: .top) {
+            if statusBarPref == UMGameStatusBar.show {
+                GeometryReader { g in
+                    UMTheme.bg
+                        .frame(height: g.safeAreaInsets.top)
+                        .offset(y: -g.safeAreaInsets.top)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
         #endif
         .onAppear { isOnScreen = true }
         .onDisappear { isOnScreen = false }
@@ -2457,4 +2474,11 @@ nonisolated enum UMActLayout {
             defaults.removeObject(forKey: key)
         }
     }
+}
+
+/// Settings key and values for the in-game Status Bar (iPhone / iPad only).
+nonisolated enum UMGameStatusBar {
+    static let key = "um.gameStatusBar"
+    static let hide = "hide"
+    static let show = "show"
 }
