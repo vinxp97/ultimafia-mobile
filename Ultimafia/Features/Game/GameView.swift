@@ -177,6 +177,15 @@ private struct GameScreen: View {
         } message: {
             Text(session.spectateFailure ?? "")
         }
+        // Join open seat refused (game full, banned, ranked rules...): still spectating.
+        .alert("Can't take a seat", isPresented: Binding(
+            get: { session.takeSeatFailure != nil },
+            set: { if !$0 { session.takeSeatFailure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(session.takeSeatFailure ?? "")
+        }
         // Seat given up: the server dropped this game from the account (redis leaveGame), so the
         // lobby's "You're in a game" banner and Leave go away.
         .onChange(of: session.spectate) { _, watching in
@@ -390,6 +399,9 @@ private struct GameHeader: View {
                 }
                 if !session.isLiarsDice {
                     GlassPhaseNavigator(session: session)
+                        .overlay(alignment: .trailing) { SpectatorCountChip(session: session, glass: true) }
+                } else {
+                    HStack { Spacer(); SpectatorCountChip(session: session, glass: true) }
                 }
             }
         }
@@ -438,6 +450,7 @@ private struct GameHeader: View {
             } else {
                 Spacer(minLength: 8)
             }
+            SpectatorCountChip(session: session, glass: false)
             PhaseTimerBadge(session: session, onTap: scrollChatToTop)
             if showsGuides, showSetupGuides, session.setupId != nil {
                 SetupGuidesButton(session: session, fillsWidth: false)
@@ -837,10 +850,11 @@ private struct GameChatPane: View {
             // Outside the transcript scroll hierarchy, but floating above its content rather
             // than reserving a separate opaque strip. Only the composer's own controls draw a glass
             // background, so nothing else gains an opaque strip.
-            if session.showComposer || session.canSwitchToSpectate {
+            if session.showComposer || session.canSwitchToSpectate || session.canTakeSeat {
                 VStack(spacing: 8) {
                     // Web PregameSeatActions: above the chat box on phones.
                     if session.canSwitchToSpectate { PregameSpectateBar(session: session) }
+                    if session.canTakeSeat { PregameJoinSeatBar(session: session) }
                     if session.showComposer {
                         ChatComposer(session: session, draft: $draft, chatFocused: chatFocused)
                     }
@@ -1465,6 +1479,8 @@ private struct ChatRow: View {
         guard layout == .standard else { return false }
         if line.isQuote { return false }
         guard isPlayerChat(line), let previous, isPlayerChat(previous), !previous.isQuote else { return false }
+        // A spectator line after a town line (or back) starts a new block so its tag shows.
+        guard session.isSpectatorChatLine(line) == session.isSpectatorChatLine(previous) else { return false }
         return previous.senderId == line.senderId
     }
 
@@ -1488,9 +1504,15 @@ private struct ChatRow: View {
                 standardRow(player: player)
             }
         }
+        .padding(.leading, session.isSpectatorChatLine(line) ? 7 : 0)
+        .overlay(alignment: .leading) {
+            if session.isSpectatorChatLine(line) {
+                Rectangle().fill(SpectatorStyle.border).frame(width: 2)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: line.senderId == "vote" ? .trailing : .leading)
         .contentShape(Rectangle())
-        .opacity(session.dimsInChat(line) ? 0.35 : (line.isQuote ? 0.9 : 1))
+        .opacity(session.dimsInChat(line) ? 0.35 : (session.isSpectatorChatLine(line) ? 0.85 : (line.isQuote ? 0.9 : 1)))
         .padding(.top, grouped ? 0 : (layout == .standard && isPlayerChat(line) ? 8 : 0))
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
@@ -1563,10 +1585,10 @@ private struct ChatRow: View {
                                         .font(.system(size: 14))
                                         .foregroundStyle(UMTheme.deadName)
                                 }
-                                if session.isSpectatorLine(line) {
-                                    Text(" (spectator)")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(UMTheme.deadName)
+                                if session.isSpectatorChatLine(line) {
+                                    SpectatorChatTag().padding(.leading, 5)
+                                } else if session.isSpectatorSender(line) {
+                                    SpectatorNameMark()
                                 }
                             }
                         } else {
@@ -1690,10 +1712,10 @@ private struct ChatRow: View {
                                         .font(.system(size: 14))
                                         .foregroundStyle(UMTheme.deadName)
                                 }
-                                if session.isSpectatorLine(line) {
-                                    Text(" (spectator)")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(UMTheme.deadName)
+                                if session.isSpectatorChatLine(line) {
+                                    SpectatorChatTag().padding(.leading, 5)
+                                } else if session.isSpectatorSender(line) {
+                                    SpectatorNameMark()
                                 }
                             }
             } else {
@@ -1709,6 +1731,8 @@ private struct ChatRow: View {
                 .foregroundStyle(UMTheme.muted)
                 .fixedSize()
         }
+        // Quote rows show the quote label instead of the name, so the tag goes before the text.
+        if line.isQuote, session.isSpectatorChatLine(line) { SpectatorChatTag() }
 
         EmoteText(
             text: body,
@@ -1731,7 +1755,7 @@ private struct ChatRow: View {
     }
 
     private func chatBodyColor(player: GamePlayer?) -> Color {
-        if session.deadStyled(line) || session.isSpectatorLine(line) { return .red }
+        if session.deadStyled(line) { return .red }
         return player?.bodyColor ?? .white
     }
 
@@ -1799,22 +1823,28 @@ private struct GameTownPane: View {
                     }
                 }
             }
-            if !session.spectatorList.isEmpty, !session.isReview {
-                Section("Spectators") {
-                    ForEach(session.spectatorList) { spectator in
+            if session.showsSpectatorList, !session.watchingSpectators.isEmpty {
+                Section {
+                    ForEach(session.watchingSpectators) { spectator in
                         HStack(spacing: dim(8, 6, 8)) {
                             UMAvatarView(userId: spectator.userId, hasAvatar: spectator.avatar,
                                          name: spectator.name, size: dim(24, 18, 32), square: spectator.squareAvatar)
                             PlayerNameView(player: spectator, fontSize: dim(14, 12, 16), dead: false)
                                 .lineLimit(1)
-                            Text("(spectator)")
-                                .font(.system(size: dim(13, 11, 14)))
-                                .foregroundStyle(UMTheme.deadName)
-                                .lineLimit(1)
-                                .fixedSize()
+                            if spectator.id == session.selfId {
+                                Text("(you)")
+                                    .font(.system(size: dim(13, 11, 14)))
+                                    .foregroundStyle(UMTheme.muted)
+                                    .fixedSize()
+                            }
                         }
                         .modifier(CompactTownRow(on: compact, pad: expanded ? 6 : 3))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("spectatorRow")
                     }
+                } header: {
+                    Label("Spectators", systemImage: "eye")
+                        .accessibilityIdentifier("spectatorsHeader")
                 }
             }
         }
@@ -2509,5 +2539,118 @@ private struct PregameSpectateBar: View {
         .padding(.horizontal, 16)
         .accessibilityLabel("Spectate")
         .accessibilityHint("Gives up your seat and watches this game as a spectator.")
+    }
+}
+
+/// Web game.css .spectator-message / .spectator-tag colours.
+enum SpectatorStyle {
+    static let border = Color(white: 0.55).opacity(0.7)
+    static let pill = Color(white: 0.5).opacity(0.28)
+    static let text = Color(white: 0.78)
+}
+
+/// Spectator Meeting line tag (web Game.jsx "Spectator" chip before the text).
+private struct SpectatorChatTag: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "eye")
+                .font(.system(size: 9, weight: .semibold))
+            Text("Spectator")
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(SpectatorStyle.text)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(SpectatorStyle.pill, in: Capsule())
+        .fixedSize()
+        .padding(.top, 1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Spectator")
+        .accessibilityIdentifier("spectatorTag")
+    }
+}
+
+/// Eye next to a spectator's name on lines outside the Spectator Meeting (pregame chat).
+private struct SpectatorNameMark: View {
+    var body: some View {
+        Image(systemName: "eye")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(SpectatorStyle.text)
+            .padding(.leading, 4)
+            .accessibilityLabel("spectator")
+            .accessibilityIdentifier("spectatorNameMark")
+    }
+}
+
+/// Header eye chip (web PlayerCount in the game top bar): eye + spectator count when the lobby
+/// allows spectating, eye-slash when it doesn't. "Dev view" for omniscient spectators.
+private struct SpectatorCountChip: View {
+    var session: GameSession
+    var glass: Bool
+
+    var body: some View {
+        if !session.isReview {
+            HStack(spacing: 4) {
+                if session.spectatingAllowed {
+                    Image(systemName: "eye")
+                    Text("\(session.spectatorCount ?? session.spectatorList.count)")
+                        .monospacedDigit()
+                } else {
+                    Image(systemName: "eye.slash")
+                }
+                if session.omniscientSpectator {
+                    Text("Dev view").fontWeight(.semibold)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(UMTheme.muted)
+            .padding(.horizontal, glass ? 9 : 0)
+            .frame(height: glass ? 30 : nil)
+            .modifier(SpectatorChipGlass(on: glass))
+            .fixedSize()
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(session.spectatingAllowed
+                ? "\(session.spectatorCount ?? session.spectatorList.count) spectators"
+                : "Spectating off")
+            .accessibilityIdentifier("spectatorCount")
+        }
+    }
+}
+
+private struct SpectatorChipGlass: ViewModifier {
+    var on: Bool
+    func body(content: Content) -> some View {
+        if on { content.glassEffect(.regular, in: .capsule) } else { content }
+    }
+}
+
+/// Spectator on the live pregame: take an open seat (web PregameSeatActions "Join",
+/// server Spectator.js `takeSeat`; refusals come back as `takeSeatFailed`).
+private struct PregameJoinSeatBar: View {
+    var session: GameSession
+
+    var body: some View {
+        Button {
+            session.takeSeat()
+        } label: {
+            HStack(spacing: 8) {
+                if session.takeSeatPending {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: "person.crop.circle.badge.plus")
+                }
+                Text("Join open seat")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(UMTheme.blood, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(session.takeSeatPending)
+        .padding(.horizontal, 16)
+        .accessibilityLabel("Join open seat")
+        .accessibilityHint("Leaves the spectators and takes a free seat in this game.")
     }
 }

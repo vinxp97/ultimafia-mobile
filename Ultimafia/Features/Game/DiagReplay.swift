@@ -176,6 +176,108 @@ struct DiagReplayView: View {
                                     "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"])
             return
         }
+        // `-UMDiagSpecChat pregame|game|postgame|join|joinfail` (with -UMDiagReplay): you are
+        // spectator s0 ("Vinman"). pregame: the Pregame chat (players + another spectator), the
+        // Join open seat bar; game: Day 2 with village chat and Spectator Meeting lines merged by
+        // time, a spectator quote, the Spectators list; postgame: no composer. What you send is
+        // echoed back the way the server would (speak -> message in that meeting, quote -> quote);
+        // join answers takeSeat with isSpectator false + playerJoin, joinfail with takeSeatFailed.
+        if let i = args.firstIndex(of: "-UMDiagSpecChat") {
+            let mode = args.indices.contains(i + 1) ? args[i + 1] : "pregame"
+            let t0 = Date().timeIntervalSince1970 * 1000 - 120_000
+            var seq = 0
+            func line(_ sender: String, _ text: String, _ meeting: String, _ dt: Double) -> [String: Any] {
+                seq += 1
+                return ["id": "sc\(seq)", "senderId": sender, "content": text, "time": t0 + dt, "meetingId": meeting]
+            }
+            var spectators: [String: Any] = [
+                "s0": ["id": "s0", "name": "Vinman", "avatar": false, "watching": true],
+                "s1": ["id": "s1", "name": "Watcher", "avatar": false, "watching": true],
+                // Pregame-only speaker (getSpectatorInfoFor watching:false): not listed.
+                "s2": ["id": "s2", "name": "Lurker", "avatar": false, "watching": false],
+            ]
+            s.debugFeed("connected", nil)
+            s.debugFeed("self", "s0")
+            s.debugFeed("isSpectator", nil)
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia", "total": 12,
+                                  "roles": [["Villager:": 6, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Mafioso:": 2, "Serial Killer:": 1]]])
+            s.debugFeed("options", ["spectating": true, "ranked": false, "competitive": false])
+            let pregameLike = mode == "pregame" || mode == "join" || mode == "joinfail"
+            if pregameLike {
+                var eleven: [String: Any] = [:]
+                for i in 0..<11 { eleven["p\(i)"] = players["p\(i)"] }
+                s.debugFeed("players", eleven)
+            }
+            s.debugFeed("spectators", spectators)
+            s.debugFeed("spectatorCount", 2)
+            var echoMeeting = "pregame"
+            if pregameLike {
+                s.debugFeed("meeting", ["id": "pregame", "name": "Pregame", "speech": true, "voting": false,
+                                        "amMember": true, "canTalk": true])
+                s.debugFeed("timerInfo", ["name": "pregameWait", "delay": 600_000])
+                s.debugFeed("message", line("p0", "hi all, one more and we start", "pregame", 0))
+                s.debugFeed("message", line("s1", "watching this one, good luck everyone", "pregame", 5_000))
+                s.debugFeed("message", line("p3", "gl hf", "pregame", 9_000))
+                s.debugFeed("message", line("s2", "brb", "pregame", 12_000))
+            } else {
+                let ids = (0..<12).map { "p\($0)" }
+                s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 2])
+                s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                        "speech": true, "voting": true, "amMember": false, "canTalk": false,
+                                        "canVote": false, "targets": ids + ["*"], "votes": ["p1": "p5", "p2": "p5"]])
+                s.debugFeed("meeting", ["id": "spec", "name": "Spectator Meeting", "speech": true, "voting": false,
+                                        "amMember": true, "canTalk": true])
+                echoMeeting = "spec"
+                s.debugFeed("message", line("p1", "I think p5 is scum, the claim makes no sense", "village", 0))
+                s.debugFeed("message", line("s1", "p5 is totally the cop lol", "spec", 4_000))
+                s.debugFeed("message", line("p5", "I am the cop. p8 is mafia", "village", 8_000))
+                s.debugFeed("message", line("s0", "this is going to be close", "spec", 12_000))
+                s.debugFeed("message", line("p8", "no way, I'm a villager", "village", 16_000))
+                s.debugFeed("quote", ["id": "sq1", "messageId": "sc3", "senderId": "s1", "toMeetingId": "spec",
+                                      "fromMeetingId": "village", "fromState": 2, "time": t0 + 20_000])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                if mode == "postgame" {
+                    s.debugFeed("state", ["id": -2, "name": "Postgame"])
+                    s.debugFeed("finished", nil)
+                }
+            }
+            s.debugSendHook = { [weak s] event, payload in
+                guard let s else { return }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    switch event {
+                    case "speak":
+                        seq += 1
+                        let m = payload["meetingId"] as? String ?? echoMeeting
+                        UMDiag.log("replay", "specchat speak -> \(m)")
+                        s.debugFeed("message", ["id": "echo\(seq)", "senderId": "s0", "content": payload["content"] ?? "",
+                                                "time": Date().timeIntervalSince1970 * 1000, "meetingId": m])
+                    case "quote":
+                        seq += 1
+                        UMDiag.log("replay", "specchat quote -> \(payload["toMeetingId"] ?? "")")
+                        var q = payload
+                        q["id"] = "eq\(seq)"; q["senderId"] = "s0"; q["time"] = Date().timeIntervalSince1970 * 1000
+                        s.debugFeed("quote", q)
+                    case "takeSeat" where mode == "joinfail":
+                        UMDiag.log("replay", "specchat takeSeat -> fail")
+                        s.debugFeed("takeSeatFailed", "This game is full.")
+                    case "takeSeat":
+                        UMDiag.log("replay", "specchat takeSeat -> seated")
+                        s.debugFeed("isSpectator", false)
+                        s.debugFeed("self", "p11")
+                        s.debugFeed("playerJoin", ["id": "p11", "name": "Vinman", "avatar": false, "playerListPosition": 11])
+                        spectators["s0"] = nil
+                        s.debugFeed("spectators", spectators)
+                        s.debugFeed("spectatorCount", 1)
+                        s.debugFeed("message", ["id": "seat-alert", "senderId": "server", "content": "Vinman has joined.",
+                                                "time": Date().timeIntervalSince1970 * 1000, "meetingId": "pregame"])
+                    default: break
+                    }
+                }
+            }
+            UMDiag.log("replay", "specchat \(mode)")
+            return
+        }
         if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
             let mode = args[i + 1]
             // `overflow`: a 20-player setup with 16 distinct roles, more than the header can fit.
