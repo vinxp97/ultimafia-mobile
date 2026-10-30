@@ -182,6 +182,90 @@ struct DiagReplayView: View {
         // time, a spectator quote, the Spectators list; postgame: no composer. What you send is
         // echoed back the way the server would (speak -> message in that meeting, quote -> quote);
         // join answers takeSeat with isSpectator false + playerJoin, joinfail with takeSeatFailed.
+        // `-UMDiagReplies` (with -UMDiagReplay): you hold seat p0 on Day 2. Styled players (name
+        // colour + BettyNoir font + text colour, gradient name, stickers), replies merged with their
+        // quote, a reply whose original is a sticker, a reply carrying a sticker, a reply to a line
+        // in another phase, and one whose quote never arrived. What you send as a reply is echoed
+        // back the way the server posts it (quote, then the line with replyTo).
+        if args.contains("-UMDiagReplies") {
+            let sticker = UMSiteEmote.url(forToken: ":gun:")?.absoluteString ?? ""
+            let t0 = Date().timeIntervalSince1970 * 1000 - 300_000
+            var styled = players
+            styled["p1"] = ["id": "p1", "name": "Bartholomew", "userId": "u1", "avatar": false, "playerListPosition": 1,
+                            "nameColor": "#e05a9c", "nameFont": "bettynoir", "textColor": "#ffd27a"]
+            styled["p2"] = ["id": "p2", "name": "Gradient", "userId": "u2", "avatar": false, "playerListPosition": 2,
+                            "nameColor": "#68a9dc", "animatedNameColor": "gradient", "nameGradientColorA": "#ffffff",
+                            "nameGradientColorB": "#be9d27", "nameGradientColorC": "#3dff6a", "textColor": "#a8e6ff"]
+            styled["p3"] = ["id": "p3", "name": "Stickerman", "userId": "u3", "avatar": false, "playerListPosition": 3,
+                            "customStickers": [":bigwave:": sticker]]
+            styled["p5"] = ["id": "p5", "name": "Player5", "userId": "u5", "avatar": false, "playerListPosition": 5,
+                            "customStickers": [":bigwave:": sticker]]
+            s.debugFeed("players", styled)
+            s.debugFeed("connected", nil)
+            s.debugFeed("self", "p0")
+            s.debugFeed("isSpectator", false)
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia", "total": 12,
+                                  "roles": [["Villager:": 6, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Mafioso:": 2, "Serial Killer:": 1]]])
+            s.debugFeed("options", ["spectating": true])
+            s.debugFeed("state", ["id": 0, "name": "Day", "dayCount": 1])
+            s.debugFeed("message", ["id": "d1", "senderId": "p7", "content": "day one: I think the Cop is lying", "time": t0, "meetingId": "village0"])
+            s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 2])
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn", "speech": true,
+                                    "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                    "targets": (0..<12).map { "p\($0)" } + ["*"], "votes": [String: Any]()])
+            var n = 0.0
+            func say(_ id: String, _ sender: String, _ text: String, replyTo: String? = nil) {
+                n += 1
+                var m: [String: Any] = ["id": id, "senderId": sender, "content": text, "time": t0 + 60_000 + n * 4_000, "meetingId": "village"]
+                if let replyTo { m["replyTo"] = replyTo }
+                s.debugFeed("message", m)
+            }
+            func quote(_ id: String, _ sender: String, of messageId: String, fromState: Int = 2, fromMeeting: String = "village") {
+                n += 1
+                s.debugFeed("quote", ["id": id, "messageId": messageId, "senderId": sender, "toMeetingId": "village",
+                                      "fromMeetingId": fromMeeting, "fromState": fromState, "time": t0 + 60_000 + n * 4_000])
+            }
+            say("m1", "p1", "the cop claim is fake, trust me :gun: see https://ultimafia.com")
+            say("m2", "p2", "who do we vote today? Doctor speak up")
+            say("m3", "p3", ":bigwave:")
+            quote("q1", "p2", of: "m1")
+            say("r1", "p2", "no, I believe the Cop", replyTo: "q1")
+            say("m4", "p8", "lets hurry up")
+            quote("q2", "p4", of: "m3")
+            say("r2", "p4", "nice sticker lol", replyTo: "q2")
+            quote("q3", "p5", of: "m2")
+            say("r3", "p5", ":bigwave:", replyTo: "q3")
+            quote("q4", "p6", of: "d1", fromState: 0, fromMeeting: "village0")
+            say("r4", "p6", "you said that yesterday too", replyTo: "q4")
+            say("r5", "p9", "replying to something old", replyTo: "q-missing")
+            s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+            s.debugSendHook = { [weak s] event, payload in
+                guard let s, event == "reply" || event == "speak" || event == "quote" else { return }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    n += 1
+                    let now = Date().timeIntervalSince1970 * 1000
+                    if event == "reply", let q = payload["quote"] as? [String: Any], let m = payload["message"] as? [String: Any] {
+                        let qid = "eq\(Int(n))"
+                        UMDiag.log("replay", "replies reply -> \(q["messageId"] ?? "")")
+                        var quote = q; quote["id"] = qid; quote["senderId"] = "p0"; quote["time"] = now
+                        s.debugFeed("quote", quote)
+                        s.debugFeed("message", ["id": "er\(Int(n))", "senderId": "p0", "content": m["content"] ?? "",
+                                                "time": now + 1, "meetingId": m["meetingId"] ?? "village", "replyTo": qid])
+                    } else if event == "quote" {
+                        UMDiag.log("replay", "replies quote -> \(payload["messageId"] ?? "")")
+                        var quote = payload; quote["id"] = "eq\(Int(n))"; quote["senderId"] = "p0"; quote["time"] = now
+                        s.debugFeed("quote", quote)
+                    } else {
+                        UMDiag.log("replay", "replies speak")
+                        s.debugFeed("message", ["id": "es\(Int(n))", "senderId": "p0", "content": payload["content"] ?? "",
+                                                "time": now, "meetingId": payload["meetingId"] ?? "village"])
+                    }
+                }
+            }
+            UMDiag.log("replay", "replies")
+            return
+        }
         if let i = args.firstIndex(of: "-UMDiagSpecChat") {
             let mode = args.indices.contains(i + 1) ? args[i + 1] : "pregame"
             let t0 = Date().timeIntervalSince1970 * 1000 - 120_000

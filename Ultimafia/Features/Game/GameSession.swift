@@ -66,6 +66,8 @@ struct ChatLine: Identifiable, Hashable {
     /// Message carried its own `alive` flag (so senderWasDead isn't a fallback guess).
     var aliveFlagKnown: Bool = false
     var newspaper: NewspaperIssue? = nil
+    /// Reply: id of the quote the server posted just before this line (Message.js `replyTo`).
+    var replyTo: String? = nil
 
     var isVoteLog: Bool { senderId == "vote" || id.hasPrefix("votehist:") }
 }
@@ -954,6 +956,28 @@ final class GameSession {
             ?? lastTalkMeetingId)
         guard let meetingId else { return false }
         lastTalkMeetingId = meetingId
+        // A queued reply goes out as the web's "reply" event (messageReply.js buildReplyPayload):
+        // not for speech abilities (whispers) or commands; the server posts the quote, then the line.
+        if let target = replyTarget, currentSpeechOption.abilityName == nil,
+           !trimmed.hasPrefix("/") || trimmed.hasPrefix("/me ") {
+            let payload: [String: Any] = [
+                "quote": [
+                    "messageId": target.id,
+                    "toMeetingId": meetingId,
+                    "fromMeetingId": target.meetingId ?? meetingId,
+                    "fromState": target.fromState ?? viewingPhaseId,
+                    "messageContent": target.content,
+                ] as [String: Any],
+                "message": ["content": trimmed, "meetingId": meetingId],
+            ]
+            socket.send("reply", object: payload)
+            #if DEBUG
+            debugSendHook?("reply", payload)
+            #endif
+            cancelReply()
+            stopTyping()
+            return true
+        }
         var payload: [String: Any] = [
             "content": trimmed,
             "meetingId": meetingId,
@@ -1033,6 +1057,96 @@ final class GameSession {
         // Spectators quote into a meeting they can speak in (Spectator.js "quote" -> canSpeakIn).
         if spectate { return showComposer && speakTargetId != nil }
         return true
+    }
+
+    // MARK: Replies (web messageReply.js)
+
+    /// Queued reply target ("Replying to Name" bar above the composer).
+    var replyTarget: ChatLine?
+    /// Line highlighted for a reply: tapped (waiting out the double-tap window) or queued.
+    var replyHighlightId: String?
+    /// Original line flashed after tapping a reply's reference, and the jump request for the view.
+    var replyFlashId: String?
+    var replyJumpRequest: (id: String, tick: Int)?
+    @ObservationIgnored private var replyTapTask: Task<Void, Never>?
+    @ObservationIgnored private var lastChatTap: (id: String, at: Date)?
+    @ObservationIgnored private var replyFlashTask: Task<Void, Never>?
+    /// Same window as a double tap: a second tap inside it quotes instead of replying.
+    nonisolated static let doubleTapWindow: TimeInterval = 0.3
+
+    /// Web canReplyTo: the double-click quoting rule, and only where you can speak.
+    func canReplyTo(_ line: ChatLine) -> Bool {
+        canQuote(line) && showComposer && !isDraftOnly && line.meetingId != nil && viewingPhaseId >= -1
+    }
+
+    enum ChatTapResult { case none, pendingReply, quoted }
+
+    /// One tap on a chat line. The first tap highlights the line and, if no second tap follows
+    /// within the double-tap window, queues a reply. A second tap on the same line inside the
+    /// window is a double tap: the pending reply is dropped (bar never shown) and the line is quoted.
+    @discardableResult
+    func chatLineTapped(_ line: ChatLine, at now: Date = Date()) -> ChatTapResult {
+        if let last = lastChatTap, last.id == line.id, now.timeIntervalSince(last.at) < Self.doubleTapWindow {
+            lastChatTap = nil
+            replyTapTask?.cancel()
+            replyTapTask = nil
+            replyHighlightId = replyTarget?.id
+            guard canQuote(line) else { return .none }
+            quote(line)
+            return .quoted
+        }
+        lastChatTap = (line.id, now)
+        guard canReplyTo(line) else { return .none }
+        replyTapTask?.cancel()
+        replyHighlightId = line.id
+        replyTapTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.doubleTapWindow))
+            guard !Task.isCancelled, let self else { return }
+            self.replyTarget = line
+            self.replyHighlightId = line.id
+            self.replyTapTask = nil
+        }
+        return .pendingReply
+    }
+
+    func cancelReply() {
+        replyTapTask?.cancel()
+        replyTapTask = nil
+        replyTarget = nil
+        replyHighlightId = nil
+    }
+
+    /// The quote a reply line answers ("quote:<id>" in this app's ids).
+    func replyQuote(for line: ChatLine, in lines: [ChatLine]) -> ChatLine? {
+        guard let r = line.replyTo else { return nil }
+        let qid = r.hasPrefix("quote:") ? r : "quote:\(r)"
+        return lines.last(where: { $0.isQuote && $0.id == qid })
+            ?? messages.last(where: { $0.isQuote && $0.id == qid })
+            ?? phases.lazy.compactMap { $0.messages.last(where: { $0.isQuote && $0.id == qid }) }.first
+    }
+
+    /// Web isReplyToQuote: same sender, same meeting.
+    func isReply(_ line: ChatLine, toQuote quote: ChatLine) -> Bool {
+        guard quote.isQuote, !line.isQuote, let r = line.replyTo else { return false }
+        let qid = r.hasPrefix("quote:") ? r : "quote:\(r)"
+        return quote.id == qid && quote.senderId == line.senderId
+            && (line.meetingId == nil || quote.meetingId == nil || line.meetingId == quote.meetingId)
+    }
+
+    /// Scroll to the original line (switching phase if it's in another one) and flash it.
+    func jumpToReplyOriginal(_ original: ChatLine) {
+        if let phase = phases.first(where: { $0.messages.contains { $0.id == original.id } })?.id,
+           phase != viewingPhaseId, !isLiarsDice {
+            viewPhase(phase)
+        }
+        replyJumpRequest = (original.id, (replyJumpRequest?.tick ?? 0) + 1)
+        replyFlashTask?.cancel()
+        replyFlashId = original.id
+        replyFlashTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            self?.replyFlashId = nil
+        }
     }
 
     func quote(_ line: ChatLine) {
@@ -1904,7 +2018,8 @@ final class GameSession {
             quotable: !isQuote && senderId != "server" && senderId != "vote",
             fromState: intValue(obj["fromState"]),
             senderWasDead: deadWhenSent(senderId: senderId, alive: obj["alive"]),
-            aliveFlagKnown: !(obj["alive"] == nil || obj["alive"] is NSNull)
+            aliveFlagKnown: !(obj["alive"] == nil || obj["alive"] is NSNull),
+            replyTo: isQuote ? nil : stringValue(obj["replyTo"]).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -2427,7 +2542,7 @@ final class GameSession {
         return r.contains("mafia") || r.contains("goon") || r.contains("cult") || r == "mafioso"
     }
 
-    private func findOriginalLine(_ id: String) -> ChatLine? {
+    func findOriginalLine(_ id: String) -> ChatLine? {
         if let line = ingestBuffer.first(where: { $0.id == id && !$0.isQuote }) { return line }
         if let line = messages.first(where: { $0.id == id && !$0.isQuote }) { return line }
         for phase in phases {

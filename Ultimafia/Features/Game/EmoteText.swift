@@ -70,6 +70,9 @@ struct EmoteText: View {
     var gameType: String = ""
     var otherRoles: [String] = []
     var roleColor: Color = UMTheme.roleMention
+    /// Body font override (reply previews draw the original line smaller); nil = .body.
+    var textFont: Font? = nil
+    private var baseFont: Font { italic ? (textFont ?? .body).italic() : (textFont ?? .body) }
 
     @State private var selectedRole: MentionedRole?
     @State private var selectedTerm: UMTerminology.Term?
@@ -158,7 +161,7 @@ struct EmoteText: View {
 
     private func runText(_ pieces: [Piece]) -> Text {
         let type = gameType.isEmpty ? "Mafia" : gameType
-        let base: Font = italic ? .body.italic() : .body
+        let base: Font = baseFont
         var out = Text("")
         for p in pieces {
             if let role = p.role {
@@ -189,7 +192,7 @@ struct EmoteText: View {
                 HStack(spacing: 3) {
                     RoleIconView(role: role, gameType: gameType.isEmpty ? "Mafia" : gameType, size: max(14, emoteSize - 2))
                     Text(piece.text ?? role)
-                        .font((italic ? Font.body.italic() : Font.body).weight(.semibold))
+                        .font(baseFont.weight(.semibold))
                         .foregroundStyle(roleColor)
                 }
                 .fixedSize()
@@ -200,7 +203,7 @@ struct EmoteText: View {
                 .fixedSize()
         } else {
             termText(piece.text ?? "")
-                .font(italic ? .body.italic() : .body)
+                .font(baseFont)
                 .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
                 .environment(\.openURL, OpenURLAction { url in
