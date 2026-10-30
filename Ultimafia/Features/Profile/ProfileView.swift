@@ -158,6 +158,9 @@ struct ProfileView: View {
                 } footer: {
                     Text("Install ID, stored only on this device.")
                 }
+                #if os(iOS)
+                UMCrashReportsSection()
+                #endif
                 Section {
                     NavigationLink("Advanced Settings") { AdvancedSettingsView() }
                         .listRowBackground(UMTheme.card)
@@ -239,7 +242,9 @@ struct ProfileView: View {
                 // `-UMDiagSettings` (with -UMDiagReplay): open on the Action Layout picker for screenshots.
                 guard ProcessInfo.processInfo.arguments.contains("-UMDiagSettings") else { return }
                 try? await Task.sleep(for: .milliseconds(600))
-                proxy.scrollTo(UMActLayout.key, anchor: .center)
+                // With -UMDiagCrash: the Diagnostics (crash reports) section instead.
+                let crash = ProcessInfo.processInfo.arguments.contains("-UMDiagCrash")
+                proxy.scrollTo(crash ? "um.crashReports" : UMActLayout.key, anchor: .center)
             }
             #endif
             }

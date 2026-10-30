@@ -56,6 +56,12 @@ struct ContentView: View {
         }
         .overlay(alignment: .top) { UMBackendBadge() }
         .preferredColorScheme(.dark)
+        #if os(iOS)
+        // Once per launch at most, when MetricKit left reports the user hasn't been asked about.
+        .sheet(isPresented: Bindable(UMCrashReporter.shared).showPrompt) {
+            UMCrashPromptSheet(reporter: UMCrashReporter.shared)
+        }
+        #endif
         .task {
             UMNotifyMaster.launch()
             await app.bootstrap()
