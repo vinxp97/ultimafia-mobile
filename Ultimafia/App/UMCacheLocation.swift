@@ -29,10 +29,18 @@ nonisolated enum UMCacheLocation {
     static var anonDecks: URL { dir("AnonDecks") }
 
     /// Move the old Caches/ folders and sound files here once, then remove the leftovers.
+    ///
+    /// Done marker is a file, not a UserDefaults write: this runs inside `root`'s one-time
+    /// initialiser, and a defaults write posts didChange synchronously to SwiftUI's @AppStorage
+    /// observers, which wait for SwiftUI's update lock. If the main thread is in a view update
+    /// that reads `root` at that moment (the You tab's cache size), each waits on the other and
+    /// the app freezes. Seen on a fresh install: UMTerminology.load hit `root` first in the
+    /// background while the You tab opened. Installs that already have the old key skip as before.
     private static func migrateFromCachesOnce(into root: URL) {
-        let key = "um.cache.movedToAppSupport.v1"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        let legacyKey = "um.cache.movedToAppSupport.v1"
         let fm = FileManager.default
+        let marker = root.appendingPathComponent(".movedToAppSupport.v1")
+        guard !UserDefaults.standard.bool(forKey: legacyKey), !fm.fileExists(atPath: marker.path) else { return }
         let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         for name in ["UMCustomAssets", "UMNameFonts", "UMImages"] {
             let old = caches.appendingPathComponent(name, isDirectory: true)
@@ -50,7 +58,7 @@ nonisolated enum UMCacheLocation {
                 try? fm.removeItem(at: file)
             }
         }
-        UserDefaults.standard.set(true, forKey: key)
+        fm.createFile(atPath: marker.path, contents: nil)
     }
 
     static func bytes() -> Int64 {
