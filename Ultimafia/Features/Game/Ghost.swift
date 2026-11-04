@@ -52,11 +52,21 @@ struct GhostClue: Identifiable, Hashable {
 enum GhostStage { case pregame, night, clue, day, dusk, other, over }
 
 extension GameSession {
+    /// Mafia setup with the Ghost role. Host without Poet turns the mini-game off on the server
+    /// (GhostGame.js picks no words, no clue rounds, wordLength undefined): treat that as plain
+    /// Mafia unless a word length or clue shows up anyway.
     var isGhostGame: Bool {
         guard !isLiarsDice else { return false }
-        if setupRoles.contains(where: { $0.name == "Ghost" }) { return true }
-        if setupRolesets.contains(where: { $0.contains { $0.name == "Ghost" } }) { return true }
-        return ghostByPhase.values.contains { $0.wordLength != nil }
+        let names = Set((setupRoles + setupRolesets.flatMap { $0 }).map(\.name))
+        let seenInfo = ghostByPhase.values.contains { $0.wordLength != nil || !$0.clues.isEmpty }
+        guard names.contains("Ghost") || seenInfo else { return false }
+        if names.contains("Host"), !names.contains("Poet"), !seenInfo, ghostClues.isEmpty { return false }
+        return true
+    }
+
+    /// Something to show in the Ghost panel (word length, a word, or clues).
+    var ghostHasContent: Bool {
+        ghostWordLength != nil || ghostMyWord != nil || ghostIAmGuessing || ghostRealWord != nil || !ghostClues.isEmpty
     }
 
     /// Games shown as one continuous chat with no phase switcher.
@@ -79,63 +89,77 @@ extension GameSession {
         return .other
     }
 
-    /// Every clue so far: the newest state's currentClueHistory (each new entry tagged with the
-    /// round it first appeared in), plus clue alerts that arrived in Give Clue after that state.
+    private func ghostClueKey(_ raw: String) -> String {
+        let sp = GhostInfo.split(raw)
+        return "\(sp.name): \(sp.text)"
+    }
+
+    /// Every clue so far, rebuilt from the "<name>: <clue>" alerts of each Give Clue state (the
+    /// Day-start "Clues" repeats are ignored). extraInfo.currentClueHistory is one shared, growing
+    /// array: the live `state` is a snapshot at state start, but history/replays show the whole
+    /// game in every state after the first clue. So it is only a seed for clues whose alerts we
+    /// don't have (e.g. trimmed chat), put first and never duplicated.
     var ghostClues: [GhostClue] {
         let ordered = phases.sorted { ghostRank($0.id) < ghostRank($1.id) }
-        var out: [GhostClue] = []
-        var known = 0
-        var prevKnown = 0
-        var latestId: Int?
-        for p in ordered {
-            guard let g = ghostByPhase[p.id] else { continue }
-            latestId = p.id
-            prevKnown = known
-            if g.clues.count > known {
-                for raw in g.clues[known...] {
-                    let s = GhostInfo.split(raw)
-                    out.append(GhostClue(index: out.count, name: s.name, text: s.text, round: p.dayCount))
-                }
-                known = g.clues.count
-            }
-        }
-        // Clues the latest state already listed (given in its own phase, e.g. on a rejoin).
-        var budget: [String: Int] = [:]
-        if let latestId, let g = ghostByPhase[latestId], g.clues.count > prevKnown {
-            for raw in g.clues[prevKnown...] { budget[raw, default: 0] += 1 }
-        }
-        let names = Set(players.map(\.name))
+        let seed = ghostByPhase.values.max { $0.clues.count < $1.clues.count }?.clues ?? []
+        var names = Set(players.map(\.name))
+        for raw in seed { names.insert(GhostInfo.split(raw).name) }
+        var fromAlerts: [GhostClue] = []
+        var seenIds = Set<String>()
         for p in ordered where p.name.lowercased().hasPrefix("give clue") {
-            if let latestId, ghostRank(p.id) < ghostRank(latestId) { continue }
             for line in p.messages where line.isServer && line.meetingId == nil {
-                let s = GhostInfo.split(line.content)
-                guard !s.name.isEmpty, !s.text.isEmpty, names.contains(s.name) else { continue }
-                if let left = budget[line.content], left > 0 { budget[line.content] = left - 1; continue }
-                out.append(GhostClue(index: out.count, name: s.name, text: s.text, round: p.dayCount))
+                guard seenIds.insert(line.id).inserted else { continue }
+                let sp = GhostInfo.split(line.content)
+                guard !sp.name.isEmpty, !sp.text.isEmpty, names.contains(sp.name) else { continue }
+                fromAlerts.append(GhostClue(index: 0, name: sp.name, text: sp.text, round: p.dayCount))
             }
         }
+        var out: [GhostClue] = []
+        if seed.count > fromAlerts.count {
+            var have: [String: Int] = [:]
+            for c in fromAlerts { have["\(c.name): \(c.text)", default: 0] += 1 }
+            for raw in seed {
+                let key = ghostClueKey(raw)
+                if let n = have[key], n > 0 { have[key] = n - 1; continue }
+                let sp = GhostInfo.split(raw)
+                out.append(GhostClue(index: 0, name: sp.name, text: sp.text, round: nil))
+            }
+        }
+        out += fromAlerts
+        for i in out.indices { out[i].index = i }
         return out
     }
 
-    /// Whose turn it is to give a clue (only during Give Clue): `giveClue`, else the newest
-    /// "<name> is giving a clue…" alert (after a rejoin the broadcast isn't replayed).
+    /// You hold the Ouija Board: only the holder is a member of its "Give Clue" meeting.
+    var ghostHoldsBoard: Bool {
+        meetings.contains { ($0.name == "Give Clue" || $0.itemName == "Ouija Board") && $0.amMember }
+    }
+
+    /// Whose turn it is to give a clue (only during Give Clue). You: the Give Clue meeting. Others:
+    /// the newest "<name> is giving a clue…" alert in this state, else the state before it (the
+    /// round's first holder is announced at Night). `giveClue` (not re-sent on reconnect) is the
+    /// last resort.
     var ghostTurn: (id: String?, name: String)? {
         guard ghostStage == .clue else { return nil }
-        if let id = ghostTurnPlayerId, let p = players.first(where: { $0.id == id }) { return (id, p.name) }
-        for line in messages.reversed() where line.isServer {
-            for suffix in [" is giving a clue…", " is giving a clue..."] where line.content.hasSuffix(suffix) {
-                let name = String(line.content.dropLast(suffix.count))
-                return (players.first { $0.name == name }?.id, name)
+        if ghostHoldsBoard, let me = selfId {
+            return (me, players.first { $0.id == me }?.name ?? "You")
+        }
+        let ordered = phases.sorted { ghostRank($0.id) < ghostRank($1.id) }
+        if let i = ordered.firstIndex(where: { $0.id == currentPhaseId }) {
+            for p in [ordered[i]] + (i > 0 ? [ordered[i - 1]] : []) {
+                for line in p.messages.reversed() where line.isServer {
+                    for suffix in [" is giving a clue…", " is giving a clue..."] where line.content.hasSuffix(suffix) {
+                        let name = String(line.content.dropLast(suffix.count))
+                        return (players.first { $0.name == name }?.id, name)
+                    }
+                }
             }
         }
+        if let id = ghostTurnPlayerId, let p = players.first(where: { $0.id == id }) { return (id, p.name) }
         return nil
     }
 
-    var isMyGhostTurn: Bool {
-        if meetings.contains(where: { $0.name == "Give Clue" && $0.amMember && $0.canVote }) { return true }
-        guard let me = selfId else { return false }
-        return ghostTurn?.id == me
-    }
+    var isMyGhostTurn: Bool { ghostHoldsBoard }
 
     private func ghostAlertValue(prefix: String) -> String? {
         for line in messages.reversed() where line.isServer && line.content.hasPrefix(prefix) {
@@ -152,13 +176,20 @@ extension GameSession {
     var ghostRealWord: String? { ghostAlertValue(prefix: "The real word was ") }
     var ghostFakeWord: String? { ghostAlertValue(prefix: "The fake word was ") }
 
-    /// Alive players without a clue in the current round (board passes in seat order).
+    /// Alive non-Host players without a clue this round, in the order the board will reach them:
+    /// seat order (players list / playerListPosition), starting after the holder, wrapping.
     var ghostStillToGive: [GamePlayer] {
         guard ghostStage == .clue else { return [] }
         let clues = ghostClues
-        let round = clues.last?.round ?? dayCount
+        let round = clues.last(where: { $0.round != nil })?.round ?? dayCount
         let given = Set(clues.filter { $0.round == round }.map(\.name))
-        return players.filter { !$0.left && !isDead($0.id) && !given.contains($0.name) && $0.id != ghostTurn?.id }
+        let seats = orderedPlayers(players).filter { !$0.left && !isDead($0.id) && knownRoles[$0.id] != "Host" }
+        let holder = ghostTurn
+        var order = seats
+        if let h = holder, let i = seats.firstIndex(where: { $0.id == h.id || $0.name == h.name }) {
+            order = Array(seats[(i + 1)...] + seats[..<i])
+        }
+        return order.filter { !given.contains($0.name) && $0.name != holder?.name }
     }
 
     func ghostPlayer(named name: String) -> GamePlayer? { players.first { $0.name == name } }
@@ -374,7 +405,7 @@ struct GhostBoard: View {
             }
             let waiting = session.ghostStillToGive
             if !waiting.isEmpty {
-                Text("Still to give a clue: \(waiting.map(\.name).joined(separator: ", "))")
+                Text("Up next: \(waiting.map(\.name).joined(separator: ", "))")
                     .font(.caption).foregroundStyle(UMTheme.muted)
             }
             if clues.isEmpty {
@@ -383,7 +414,7 @@ struct GhostBoard: View {
                 let rounds = groupedRounds(clues)
                 ForEach(Array(rounds.enumerated()), id: \.offset) { _, group in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(group.round.map { "Round \($0)" } ?? "Clues")
+                        Text(group.round.map { "Round \($0)" } ?? "Earlier clues")
                             .font(.caption.weight(.bold)).foregroundStyle(UMTheme.muted)
                         ForEach(group.clues) { c in
                             HStack(alignment: .top, spacing: 8) {

@@ -23,7 +23,7 @@ struct GamePlayer: Identifiable, Hashable {
     var nameGradientColorA: String?
     var nameGradientColorB: String?
     var nameGradientColorC: String?
-    /// Finite numeric `playerListPosition` only. String indexes from ArrayHash are ignored (desktop Number.isFinite("0") is false).
+    /// Seat index from `playerListPosition` (number or numeric string, e.g. "0" from ArrayHash.indexOf).
     var playerListPosition: Double? = nil
     var customEmotes: [String: String] = [:]
     var customStickers: [String: String] = [:]
@@ -1891,10 +1891,14 @@ final class GameSession {
         return tokens
     }
 
-    /// Desktop `Number.isFinite(playerListPosition)`. Strings like "0" do not count.
+    /// `Number(playerListPosition)`. The server sends it as a string (ArrayHash.indexOf), in the
+    /// same seat order as the players payload, which is also the Ouija Board's passing order.
     private func umFiniteListPosition(_ any: Any?) -> Double? {
         if any == nil || any is NSNull { return nil }
-        if any is String { return nil }
+        if let s = any as? String {
+            guard let d = Double(s.trimmingCharacters(in: .whitespaces)), d.isFinite else { return nil }
+            return d
+        }
         if any is Bool { return nil }
         if let d = any as? Double, d.isFinite { return d }
         if let i = any as? Int { return Double(i) }

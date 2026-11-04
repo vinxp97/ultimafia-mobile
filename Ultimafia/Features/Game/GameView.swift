@@ -415,8 +415,10 @@ private struct GameHeader: View {
                         SetupGuidesButton(session: session, fillsWidth: false)
                     }
                 }
-                if session.isGhostGame {
+                if session.isGhostGame, session.ghostHasContent {
                     GhostHeaderPanel(session: session, glass: true)
+                } else if session.isGhostGame {
+                    HStack { Spacer(); SpectatorCountChip(session: session, glass: true) }
                 } else if !session.isLiarsDice {
                     GlassPhaseNavigator(session: session)
                         .overlay(alignment: .trailing) { SpectatorCountChip(session: session, glass: true) }
@@ -463,10 +465,10 @@ private struct GameHeader: View {
                 Group { if session.isLiarsDice { Color.clear } else { SetupRoleStrip(session: session) } }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(-1)
-                if session.isGhostGame {
+                if session.isGhostGame, session.ghostHasContent {
                     GhostHeaderPanel(session: session, glass: false, singleLine: true)
                         .frame(maxWidth: 420)
-                } else if !session.isLiarsDice {
+                } else if !session.isSingleStateView {
                     PagedPhaseBar(session: session, visible: 6)
                         .fixedSize()
                 }
@@ -2142,7 +2144,7 @@ private struct GameActPane: View {
                 }
                 // Ghost: the action (clue / guess / pick / condemn vote) first, the clue log below
                 // it (the header already pins the clues at the top).
-                if session.isGhostGame {
+                if session.isGhostGame, session.ghostHasContent {
                     GhostBoard(session: session)
                 }
             }
@@ -2315,8 +2317,16 @@ private struct MeetingBlock: View {
     /// Headline is the server's action name, as on desktop ("Vote to Condemn", "Mafia Kill",
     /// "Shoot", a role's action); the tag says where it comes from (item, else meeting name).
     private var source: String? {
-        if let item = meeting.itemName, !item.isEmpty { return item }
+        if let item = meeting.itemName, !item.isEmpty { return Self.itemLabel(item) }
         return meeting.name != meeting.actionName ? meeting.name : nil
+    }
+
+    /// Server item ids that aren't display names.
+    static func itemLabel(_ item: String) -> String {
+        switch item {
+        case "GhostGuessWord": return "Guess Word"
+        default: return item
+        }
     }
 
     private var clickable: Bool {

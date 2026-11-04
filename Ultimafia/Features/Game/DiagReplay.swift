@@ -160,9 +160,75 @@ struct DiagReplayView: View {
             s.debugFeed("connected", nil)
             s.debugFeed("self", "p0")
             s.debugFeed("isSpectator", false)
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                let line = "GHOSTCHECK mode=\(mode) stage=\(s.ghostStage) turn=\(s.ghostTurn?.name ?? "-") "
+                    + "mine=\(s.isMyGhostTurn) clues=\(s.ghostClues.count) last=\(s.ghostClues.last.map { "\($0.name):\($0.text)" } ?? "-") "
+                    + "word=\(s.ghostMyWord ?? "-") real=\(s.ghostRealWord ?? "-") len=\(s.ghostWordLength ?? 0) "
+                    + "single=\(s.isSingleStateView) ghost=\(s.isGhostGame) panel=\(s.ghostHasContent) "
+                    + "rounds=\(s.ghostClues.map { $0.round.map(String.init) ?? "e" }.joined(separator: "")) "
+                    + "meetings=\(s.meetings.map(\.name).joined(separator: ","))"
+                print(line)
+                fflush(stdout)
+                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    try? (line + "\n").write(to: dir.appendingPathComponent("ghostcheck.txt"), atomically: true, encoding: .utf8)
+                }
+                UMDiag.log("replay", line)
+            }
+            let ids = (0..<names.count).map { "p\($0)" }
+            // Reconnect / replay: one `history` payload. Pranay: currentClueHistory is the game's
+            // one shared array, so every stored state after the first clue serializes ALL clues so
+            // far; states before the first clue have it undefined; giveClue is not re-sent.
+            // replay: alerts present, Dana's turn announced inside Give Clue 2 (expect 11 clues,
+            // no duplicates, rounds 1/2). replaynight: Give Clue 1 alerts trimmed (seeded from
+            // extraInfo), Give Clue 2 just started; Bob's turn was announced in Night 2.
+            // host: Ghost + Host without Poet, no words / wordLength: plain Mafia.
+            if mode == "host" {
+                s.debugFeed("setup", ["id": "diag-ghost-host", "name": "Haunted Hosting", "gameType": "Mafia", "total": 8,
+                                      "roles": [["Villager:": 5, "Ghost:": 2, "Host:": 1]]])
+                s.debugFeed("state", ["id": -1, "name": "Pregame"])
+                s.debugFeed("state", ["id": 0, "name": "Night 1", "dayCount": 1, "extraInfo": ["showGameInfo": false]])
+                s.debugFeed("state", ["id": 1, "name": "Day 1", "dayCount": 1, "extraInfo": ["showGameInfo": false]])
+                s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                        "speech": true, "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                        "targets": ids + ["*"], "votes": [String: Any]()])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                return
+            }
             s.debugFeed("setup", ["id": "diag-ghost", "name": "Ghost Town", "gameType": "Mafia", "total": 8,
                                   "roles": [["Villager:": 5, "Ghost:": 2, "Miller:": 1]]])
-            let ids = (0..<names.count).map { "p\($0)" }
+            if mode == "replay" || mode == "replaynight" {
+                let night = mode == "replaynight"
+                var t0 = Date().timeIntervalSince1970 * 1000 - 600_000
+                func al(_ id: String, _ text: String) -> [String: Any] {
+                    t0 += 3_000
+                    return ["id": id, "senderId": "server", "content": text, "time": t0]
+                }
+                let r1 = [("Alice", "saddle"), ("Bob", "gallop"), ("Charlie", "stable"), ("Dana", "hay"),
+                          ("Eve", "carriage"), ("Frank", "mane"), ("Grace", "farm"), ("Vinman", "pony")]
+                let r2 = night ? [] : [("Bob", "rider"), ("Charlie", "hooves")]
+                let whole = (r1 + r2).map { "\($0.0): \($0.1)" }
+                let xi: [String: Any] = ["wordLength": 5, "currentClueHistory": whole, "showGameInfo": true]
+                var gc1: [[String: Any]] = []
+                if !night { for (n, c) in r1.enumerated() { gc1.append(al("h1-\(n)", "\(c.0): \(c.1)")) } }
+                var gc2: [[String: Any]] = []
+                for (n, c) in r2.enumerated() { gc2.append(al("h2-\(n)", "\(c.0): \(c.1)")) }
+                if !night { gc2.append(al("h2-turn", "Dana is giving a clue…")) }
+                let history: [String: Any] = [
+                    "-1": ["name": "Pregame", "alerts": [[String: Any]]()],
+                    "0": ["name": "Night 1", "dayCount": 1, "extraInfo": ["wordLength": 5, "showGameInfo": false],
+                          "alerts": [al("hw", "The secret word is: horse."), al("hn1", "Alice is giving a clue…")]],
+                    "1": ["name": "Give Clue 1", "dayCount": 1, "extraInfo": ["wordLength": 5, "currentClueHistory": whole, "showGameInfo": false],
+                          "alerts": gc1],
+                    "2": ["name": "Day 1", "dayCount": 1, "extraInfo": xi,
+                          "alerts": [al("hc", "Clues")] + r1.enumerated().map { al("hr-\($0.offset)", "\($0.element.0): \($0.element.1)") }],
+                    "3": ["name": "Night 2", "dayCount": 2, "extraInfo": xi, "alerts": [al("hn2", "Bob is giving a clue…")]],
+                    "4": ["name": "Give Clue 2", "dayCount": 2, "extraInfo": xi, "alerts": gc2],
+                ]
+                s.debugFeed("history", history)
+                s.debugFeed("timerInfo", ["name": "main", "delay": 77_000])
+                return
+            }
             var t = Date().timeIntervalSince1970 * 1000 - 400_000
             func alert(_ id: String, _ text: String) {
                 t += 3_000
@@ -173,19 +239,6 @@ struct DiagReplayView: View {
                 s.debugFeed("message", ["id": id, "senderId": from, "content": text, "time": t, "meetingId": meeting])
             }
             let ghostMe = mode == "dusk" || mode == "night"
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(5))
-                let line = "GHOSTCHECK mode=\(mode) stage=\(s.ghostStage) turn=\(s.ghostTurn?.name ?? "-") "
-                    + "mine=\(s.isMyGhostTurn) clues=\(s.ghostClues.count) last=\(s.ghostClues.last.map { "\($0.name):\($0.text)" } ?? "-") "
-                    + "word=\(s.ghostMyWord ?? "-") real=\(s.ghostRealWord ?? "-") len=\(s.ghostWordLength ?? 0) "
-                    + "single=\(s.isSingleStateView) meetings=\(s.meetings.map(\.name).joined(separator: ","))"
-                print(line)
-                fflush(stdout)
-                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-                    try? (line + "\n").write(to: dir.appendingPathComponent("ghostcheck.txt"), atomically: true, encoding: .utf8)
-                }
-                UMDiag.log("replay", line)
-            }
             s.debugFeed("state", ["id": -1, "name": "Pregame"])
             s.debugFeed("state", ["id": 0, "name": "Night 1", "dayCount": 1,
                                   "extraInfo": ["wordLength": 5, "showGameInfo": false]])
