@@ -141,11 +141,14 @@ struct DiagReplayView: View {
             UMDiag.log("replay", "votes")
             return
         }
-        // `-UMDiagGhost clue|day|dusk [act]` (with -UMDiagReplay): a Mafia game with the Ghost role,
-        // events shaped like the server's (Mafia getStateInfo extraInfo, OuijaBoard Give Clue, the
-        // giveClue broadcast, GhostGuessWord). clue: your turn (p0) to give a clue; day: Day 2
-        // with the Village condemn vote; dusk: you are the condemned Ghost guessing the word.
-        // `act` opens on the Act tab.
+        // `-UMDiagGhost night|clueother|clue|cluepass|day|dusk|over [act]` (with -UMDiagReplay): a
+        // Mafia game with the Ghost role, events shaped like the server's (Mafia getStateInfo
+        // extraInfo, OuijaBoard Give Clue, the giveClue broadcast, GhostGuessWord). night: you are a
+        // Ghost picking the first clue giver; clueother: Eve's turn; clue: your turn (p0);
+        // cluepass: your turn, then the fixture submits "stallion" through session.vote and the turn
+        // passes to Eve; day: Day 2 with the Village condemn vote; dusk: you are the condemned Ghost
+        // guessing the word; over: Postgame with the word reveal. `act` opens on the Act tab.
+        // Prints a GHOSTCHECK line to stdout (and Documents/ghostcheck.txt) 5 s in (scripts/ghost-sim-test.sh asserts on it).
         if let i = args.firstIndex(of: "-UMDiagGhost") {
             let mode = args.indices.contains(i + 1) ? args[i + 1] : "clue"
             let names = ["Vinman", "Alice", "Bob", "Charlie", "Dana", "Eve", "Frank", "Grace"]
@@ -169,11 +172,33 @@ struct DiagReplayView: View {
                 t += 3_000
                 s.debugFeed("message", ["id": id, "senderId": from, "content": text, "time": t, "meetingId": meeting])
             }
-            let ghostMe = mode == "dusk"
+            let ghostMe = mode == "dusk" || mode == "night"
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                let line = "GHOSTCHECK mode=\(mode) stage=\(s.ghostStage) turn=\(s.ghostTurn?.name ?? "-") "
+                    + "mine=\(s.isMyGhostTurn) clues=\(s.ghostClues.count) last=\(s.ghostClues.last.map { "\($0.name):\($0.text)" } ?? "-") "
+                    + "word=\(s.ghostMyWord ?? "-") real=\(s.ghostRealWord ?? "-") len=\(s.ghostWordLength ?? 0) "
+                    + "single=\(s.isSingleStateView) meetings=\(s.meetings.map(\.name).joined(separator: ","))"
+                print(line)
+                fflush(stdout)
+                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    try? (line + "\n").write(to: dir.appendingPathComponent("ghostcheck.txt"), atomically: true, encoding: .utf8)
+                }
+                UMDiag.log("replay", line)
+            }
             s.debugFeed("state", ["id": -1, "name": "Pregame"])
             s.debugFeed("state", ["id": 0, "name": "Night 1", "dayCount": 1,
                                   "extraInfo": ["wordLength": 5, "showGameInfo": false]])
             alert("w", ghostMe ? "Guess the hidden word of length: 5" : "The secret word is: horse.")
+            if mode == "night" {
+                s.debugFeed("meeting", ["id": "ghostpick", "name": "Ghost", "actionName": "Pick first clue giver",
+                                        "voting": true, "instant": true, "group": true, "mustAct": true,
+                                        "amMember": true, "canVote": true,
+                                        "targets": ids, "votes": ["p4": "p1"]])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 41_000])
+                UMDiag.log("replay", "ghost night")
+                return
+            }
             alert("pick", "Alice is giving a clue…")
             s.debugFeed("giveClue", "p1")
             s.debugFeed("state", ["id": 1, "name": "Give Clue 1", "dayCount": 1,
@@ -196,7 +221,7 @@ struct DiagReplayView: View {
             for (n, c) in r2.enumerated() { alert("c2-\(n)", "\(c.0): \(c.1)") }
             let all = (r1 + r2).map { "\($0.0): \($0.1)" }
             switch mode {
-            case "day", "dusk":
+            case "day", "dusk", "over":
                 for (n, c) in [("Frank", "neigh"), ("Grace", "race"), ("Vinman", "stallion")].enumerated() {
                     alert("c3-\(n)", "\(c.0): \(c.1)")
                 }
@@ -206,7 +231,15 @@ struct DiagReplayView: View {
                 alert("cl", "Clues")
                 say("e1", "p3", "Grace said race twice now, sus", "village")
                 say("e2", "p7", "race is a horse thing!! vote Frank", "village")
-                if mode == "dusk" {
+                if mode == "over" {
+                    alert("o1", "Grace has been condemned.")
+                    alert("o2", "Grace guesses horse.")
+                    alert("o3", "The Ghost has successfully guessed the word!")
+                    s.debugFeed("state", ["id": -2, "name": "Postgame",
+                                          "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
+                    alert("o4", "The real word was horse.")
+                    alert("o5", "The fake word was zebra.")
+                } else if mode == "dusk" {
                     alert("cd", "Vinman has been condemned.")
                     s.debugFeed("state", ["id": 7, "name": "Dusk 2", "dayCount": 2,
                                           "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
@@ -226,6 +259,10 @@ struct DiagReplayView: View {
                     }
                     s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
                 }
+            case "clueother":
+                alert("turn", "Eve is giving a clue…")
+                s.debugFeed("giveClue", "p5")
+                s.debugFeed("timerInfo", ["name": "main", "delay": 104_000])
             default:
                 alert("turn", "Vinman is giving a clue…")
                 s.debugFeed("giveClue", "p0")
@@ -245,6 +282,12 @@ struct DiagReplayView: View {
                         s.debugFeed("leftMeeting", "clue")
                         alert("next", "Eve is giving a clue…")
                         s.debugFeed("giveClue", "p5")
+                    }
+                }
+                if mode == "cluepass" {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(2.5))
+                        s.vote(meetingId: "clue", selection: "stallion")
                     }
                 }
             }
