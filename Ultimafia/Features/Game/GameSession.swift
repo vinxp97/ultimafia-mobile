@@ -104,6 +104,8 @@ struct VoteMeeting: Identifiable, Hashable {
     var instantButChangeable: Bool = false
     var noUnvote: Bool = false
     var playerHasVoted: Bool = false
+    /// Server textOptions for inputType "text" (min/max length, alphaOnly, toLowerCase, submit label).
+    var textOptions = UMTextOptions()
 
     /// Web `notClickable` lock-after-vote clause.
     func lockedAfterVote(selfId: String?) -> Bool {
@@ -321,6 +323,10 @@ final class GameSession {
     /// Dice tab bet log: "Prior rounds" disclosure, per game (in memory).
     var ldShowPriorRounds = false
     var isLiarsDice: Bool { (gameType ?? setupGameType) == "Liars Dice" }
+    /// Ghost mini-game info per state id (Mafia extraInfo: wordLength + currentClueHistory).
+    var ghostByPhase: [Int: GhostInfo] = [:]
+    /// `giveClue` broadcast: player id holding the Ouija Board (whose turn it is to give a clue).
+    var ghostTurnPlayerId: String?
     var ldViewing: LDState? {
         let id = isViewingLive ? currentPhaseId : viewingPhaseId
         return ldByPhase[id] ?? (id == -2 ? ldByPhase.filter { $0.key >= 0 }.max { $0.key < $1.key }?.value : nil)
@@ -655,7 +661,7 @@ final class GameSession {
 
     var displayedMessages: [ChatLine] {
         // Liars Dice has no phase switcher (one state per turn): show the whole game's chat.
-        if isLiarsDice { return phases.sorted { rank($0.id) < rank($1.id) }.flatMap(\.messages) }
+        if isSingleStateView { return phases.sorted { rank($0.id) < rank($1.id) }.flatMap(\.messages) }
         return phases.first(where: { $0.id == viewingPhaseId })?.messages ?? messages
     }
 
@@ -1047,6 +1053,9 @@ final class GameSession {
                 "meetingId": meetingId,
                 "selection": selection,
             ])
+            #if DEBUG
+            debugSendHook?("vote", ["meetingId": meetingId, "selection": selection])
+            #endif
         }
     }
 
@@ -1136,7 +1145,7 @@ final class GameSession {
     /// Scroll to the original line (switching phase if it's in another one) and flash it.
     func jumpToReplyOriginal(_ original: ChatLine) {
         if let phase = phases.first(where: { $0.messages.contains { $0.id == original.id } })?.id,
-           phase != viewingPhaseId, !isLiarsDice {
+           phase != viewingPhaseId, !isSingleStateView {
             viewPhase(phase)
         }
         replyJumpRequest = (original.id, (replyJumpRequest?.tick ?? 0) + 1)
@@ -1538,6 +1547,12 @@ final class GameSession {
         case "diceRoll", "diceRoll2":
             // Liars Dice new round: play the file the event names, once.
             if !isQuiet { GameSFX.play(event) }
+        case "giveClue":
+            // Ghost: the Ouija Board moved; data is the id of the player whose turn it is.
+            if let id = data as? String {
+                ghostTurnPlayerId = id
+                if !isQuiet, id == selfId { GameSFX.play("ghostAsk") }
+            }
         case "history":
             ingestHistory(data)
         case "message":
@@ -1682,6 +1697,7 @@ final class GameSession {
             if let d = state["dayCount"] as? Double { phaseDay = Int(d) }
             ensurePhase(id: phaseId, name: phaseName, dayCount: phaseDay)
             if let ld = LDState(state["extraInfo"]) { ldByPhase[phaseId] = ld }
+            if let gh = GhostInfo(state["extraInfo"]) { ghostByPhase[phaseId] = gh }
             applyDeadMap(state["dead"])
             deadByPhase[phaseId] = Self.deadSet(state["dead"])
             let rolesBefore = knownRoles
@@ -2126,7 +2142,8 @@ final class GameSession {
                 instant: boolValue(obj["instant"]),
                 instantButChangeable: boolValue(obj["instantButChangeable"]),
                 noUnvote: boolValue(obj["noUnvote"]),
-                playerHasVoted: boolValue(obj["playerHasVoted"])
+                playerHasVoted: boolValue(obj["playerHasVoted"]),
+                textOptions: UMTextOptions(obj["textOptions"])
             )
             let meetingName = name.lowercased()
             if meetingName.contains("mafia") || meetingName.contains("cult") {
@@ -2226,7 +2243,8 @@ final class GameSession {
                 instant: boolValue(obj["instant"]),
                 instantButChangeable: boolValue(obj["instantButChangeable"]),
                 noUnvote: boolValue(obj["noUnvote"]),
-                playerHasVoted: boolValue(obj["playerHasVoted"])
+                playerHasVoted: boolValue(obj["playerHasVoted"]),
+                textOptions: UMTextOptions(obj["textOptions"])
             ))
         }
         return nextVotes
@@ -2428,7 +2446,9 @@ final class GameSession {
             ldByPhase[id] = ld
             if !isQuiet, phaseChanged || old != ld { LDEvents.handle(old: old, new: ld, selfId: selfId) }
         }
-        if followLive {
+        if let gh = GhostInfo(obj["extraInfo"]) { ghostByPhase[id] = gh }
+        if phaseChanged, !name.lowercased().hasPrefix("give clue") { ghostTurnPlayerId = nil }
+        if followLive || isSingleStateView {
             viewingPhaseId = id
         }
         if name.lowercased() == "postgame" || id == -2 {

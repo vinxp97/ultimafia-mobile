@@ -16,6 +16,7 @@ struct GameView: View {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-UMDiagVotes"), args.indices.contains(i + 1), args[i + 1].hasPrefix("act") { return 2 }
+        if let i = args.firstIndex(of: "-UMDiagGhost"), args.indices.contains(i + 2), args[i + 2] == "act" { return 2 }
         #endif
         return 0
     }
@@ -414,7 +415,9 @@ private struct GameHeader: View {
                         SetupGuidesButton(session: session, fillsWidth: false)
                     }
                 }
-                if !session.isLiarsDice {
+                if session.isGhostGame {
+                    GhostHeaderPanel(session: session, glass: true)
+                } else if !session.isLiarsDice {
                     GlassPhaseNavigator(session: session)
                         .overlay(alignment: .trailing) { SpectatorCountChip(session: session, glass: true) }
                 } else {
@@ -460,7 +463,10 @@ private struct GameHeader: View {
                 Group { if session.isLiarsDice { Color.clear } else { SetupRoleStrip(session: session) } }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(-1)
-                if !session.isLiarsDice {
+                if session.isGhostGame {
+                    GhostHeaderPanel(session: session, glass: false, singleLine: true)
+                        .frame(maxWidth: 420)
+                } else if !session.isLiarsDice {
                     PagedPhaseBar(session: session, visible: 6)
                         .fixedSize()
                 }
@@ -722,7 +728,7 @@ private struct GameChatPane: View {
                     }
                     #if os(iOS)
                     .background {
-                        UMPhaseSwipeBridge(enabled: !session.isLiarsDice,
+                        UMPhaseSwipeBridge(enabled: !session.isSingleStateView,
                                            onChange: swipeChanged, onEnd: swipeEnded)
                     }
                     #endif
@@ -2134,6 +2140,11 @@ private struct GameActPane: View {
                             .id(meeting.id)
                     }
                 }
+                // Ghost: the action (clue / guess / pick / condemn vote) first, the clue log below
+                // it (the header already pins the clues at the top).
+                if session.isGhostGame {
+                    GhostBoard(session: session)
+                }
             }
             .padding(16)
             if session.kickMeeting != nil, !(session.selfId.map(session.isDead) ?? true) {
@@ -2283,6 +2294,24 @@ private struct MeetingBlock: View {
     var needsVote: Bool = false
     @State private var textDraft = ""
 
+    private var textPlaceholder: String {
+        let o = meeting.textOptions
+        switch meeting.name {
+        case "Give Clue": return "Your clue"
+        case "Guess Word": return "Your guess"
+        default: break
+        }
+        if let max = o.maxLength, o.minLength > 1 { return "\(o.minLength)–\(max) characters" }
+        return "Type…"
+    }
+
+    private func submitText() {
+        let s = textDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard meeting.textOptions.accepts(s) else { return }
+        session.vote(meetingId: meeting.id, selection: s)
+        textDraft = ""
+    }
+
     /// Headline is the server's action name, as on desktop ("Vote to Condemn", "Mafia Kill",
     /// "Shoot", a role's action); the tag says where it comes from (item, else meeting name).
     private var source: String? {
@@ -2336,16 +2365,19 @@ private struct MeetingBlock: View {
             } else if meeting.inputType == "text" {
                 if clickable {
                     HStack(spacing: 8) {
-                        TextField("Type…", text: $textDraft)
+                        let opts = meeting.textOptions
+                        TextField(textPlaceholder, text: $textDraft)
                             .textFieldStyle(.roundedBorder)
-                        Button("Send") {
-                            let s = textDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !s.isEmpty else { return }
-                            session.vote(meetingId: meeting.id, selection: s)
-                            textDraft = ""
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(UMTheme.blood)
+                            .autocorrectionDisabled(opts.alphaOnly)
+                            .onChange(of: textDraft) { _, v in
+                                let f = opts.filter(v)
+                                if f != v { textDraft = f }
+                            }
+                            .onSubmit(submitText)
+                        Button(opts.submit ?? "Send", action: submitText)
+                            .buttonStyle(.borderedProminent)
+                            .tint(UMTheme.blood)
+                            .disabled(!opts.accepts(textDraft.trimmingCharacters(in: .whitespacesAndNewlines)))
                     }
                 }
             } else {
@@ -2681,7 +2713,7 @@ private struct SpectatorNameMark: View {
 
 /// Header eye chip (web PlayerCount in the game top bar): eye + spectator count when the lobby
 /// allows spectating, eye-slash when it doesn't. "Dev view" for omniscient spectators.
-private struct SpectatorCountChip: View {
+struct SpectatorCountChip: View {
     var session: GameSession
     var glass: Bool
 

@@ -141,6 +141,116 @@ struct DiagReplayView: View {
             UMDiag.log("replay", "votes")
             return
         }
+        // `-UMDiagGhost clue|day|dusk [act]` (with -UMDiagReplay): a Mafia game with the Ghost role,
+        // events shaped like the server's (Mafia getStateInfo extraInfo, OuijaBoard Give Clue, the
+        // giveClue broadcast, GhostGuessWord). clue: your turn (p0) to give a clue; day: Day 2
+        // with the Village condemn vote; dusk: you are the condemned Ghost guessing the word.
+        // `act` opens on the Act tab.
+        if let i = args.firstIndex(of: "-UMDiagGhost") {
+            let mode = args.indices.contains(i + 1) ? args[i + 1] : "clue"
+            let names = ["Vinman", "Alice", "Bob", "Charlie", "Dana", "Eve", "Frank", "Grace"]
+            var ps: [String: Any] = [:]
+            for (n, name) in names.enumerated() {
+                ps["p\(n)"] = ["id": "p\(n)", "name": name, "avatar": false, "playerListPosition": n]
+            }
+            s.debugFeed("players", ps)
+            s.debugFeed("connected", nil)
+            s.debugFeed("self", "p0")
+            s.debugFeed("isSpectator", false)
+            s.debugFeed("setup", ["id": "diag-ghost", "name": "Ghost Town", "gameType": "Mafia", "total": 8,
+                                  "roles": [["Villager:": 5, "Ghost:": 2, "Miller:": 1]]])
+            let ids = (0..<names.count).map { "p\($0)" }
+            var t = Date().timeIntervalSince1970 * 1000 - 400_000
+            func alert(_ id: String, _ text: String) {
+                t += 3_000
+                s.debugFeed("message", ["id": id, "senderId": "server", "content": text, "time": t])
+            }
+            func say(_ id: String, _ from: String, _ text: String, _ meeting: String) {
+                t += 3_000
+                s.debugFeed("message", ["id": id, "senderId": from, "content": text, "time": t, "meetingId": meeting])
+            }
+            let ghostMe = mode == "dusk"
+            s.debugFeed("state", ["id": -1, "name": "Pregame"])
+            s.debugFeed("state", ["id": 0, "name": "Night 1", "dayCount": 1,
+                                  "extraInfo": ["wordLength": 5, "showGameInfo": false]])
+            alert("w", ghostMe ? "Guess the hidden word of length: 5" : "The secret word is: horse.")
+            alert("pick", "Alice is giving a clue…")
+            s.debugFeed("giveClue", "p1")
+            s.debugFeed("state", ["id": 1, "name": "Give Clue 1", "dayCount": 1,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": [String](), "showGameInfo": false]])
+            let r1 = [("Alice", "saddle"), ("Bob", "gallop"), ("Charlie", "stable"), ("Dana", "hay"),
+                      ("Eve", "carriage"), ("Frank", "mane"), ("Grace", "farm"), ("Vinman", "pony")]
+            for (n, c) in r1.enumerated() { alert("c1-\(n)", "\(c.0): \(c.1)") }
+            s.debugFeed("state", ["id": 2, "name": "Day 1", "dayCount": 1,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": r1.map { "\($0.0): \($0.1)" }, "showGameInfo": true]])
+            say("d1", "p2", "Grace said farm, that's vague", "village1")
+            say("d2", "p7", "farm fits, horses live on farms!", "village1")
+            alert("d3", "No one was condemned.")
+            s.debugFeed("state", ["id": 4, "name": "Night 2", "dayCount": 2,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": r1.map { "\($0.0): \($0.1)" }, "showGameInfo": true]])
+            alert("n2", "Bob is giving a clue…")
+            s.debugFeed("giveClue", "p2")
+            s.debugFeed("state", ["id": 5, "name": "Give Clue 2", "dayCount": 2,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": r1.map { "\($0.0): \($0.1)" }, "showGameInfo": true]])
+            let r2 = [("Bob", "rider"), ("Charlie", "hooves"), ("Dana", "barn")]
+            for (n, c) in r2.enumerated() { alert("c2-\(n)", "\(c.0): \(c.1)") }
+            let all = (r1 + r2).map { "\($0.0): \($0.1)" }
+            switch mode {
+            case "day", "dusk":
+                for (n, c) in [("Frank", "neigh"), ("Grace", "race"), ("Vinman", "stallion")].enumerated() {
+                    alert("c3-\(n)", "\(c.0): \(c.1)")
+                }
+                let full = all + ["Frank: neigh", "Grace: race", "Vinman: stallion"]
+                s.debugFeed("state", ["id": 6, "name": "Day 2", "dayCount": 2,
+                                      "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
+                alert("cl", "Clues")
+                say("e1", "p3", "Grace said race twice now, sus", "village")
+                say("e2", "p7", "race is a horse thing!! vote Frank", "village")
+                if mode == "dusk" {
+                    alert("cd", "Vinman has been condemned.")
+                    s.debugFeed("state", ["id": 7, "name": "Dusk 2", "dayCount": 2,
+                                          "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
+                    s.debugFeed("meeting", ["id": "guess", "name": "Guess Word", "actionName": "Guess Word",
+                                            "voting": true, "instant": true, "amMember": true, "canVote": true,
+                                            "inputType": "text", "itemName": "GhostGuessWord",
+                                            "textOptions": ["minLength": 2, "maxLength": 20, "alphaOnly": true,
+                                                            "toLowerCase": true, "submit": "Confirm"],
+                                            "targets": [String](), "votes": [String: Any]()])
+                    s.debugFeed("timerInfo", ["name": "main", "delay": 52_000])
+                } else {
+                    s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                            "speech": true, "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                            "targets": ids + ["*"], "votes": [String: Any]()])
+                    for (voter, target) in [("p1", "p6"), ("p3", "p7"), ("p7", "p6")] {
+                        s.debugFeed("vote", ["meetingId": "village", "voterId": voter, "target": target])
+                    }
+                    s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                }
+            default:
+                alert("turn", "Vinman is giving a clue…")
+                s.debugFeed("giveClue", "p0")
+                s.debugFeed("meeting", ["id": "clue", "name": "Give Clue", "actionName": "Give Clue (1-50)",
+                                        "voting": true, "instant": true, "amMember": true, "canVote": true,
+                                        "inputType": "text", "itemName": "Ouija Board",
+                                        "textOptions": ["minLength": 1, "maxLength": 50, "submit": "Confirm"],
+                                        "targets": [String](), "votes": [String: Any]()])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 104_000])
+                // What you submit is answered the way OuijaBoard does: the alert, then the next holder.
+                s.debugSendHook = { [weak s] event, payload in
+                    guard let s, event == "vote", payload["meetingId"] as? String == "clue",
+                          let clue = payload["selection"] as? String else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        alert("mine", "Vinman: \(clue)")
+                        s.debugFeed("leftMeeting", "clue")
+                        alert("next", "Eve is giving a clue…")
+                        s.debugFeed("giveClue", "p5")
+                    }
+                }
+            }
+            UMDiag.log("replay", "ghost \(mode)")
+            return
+        }
         // `-UMDiagSpectate [ok|fail]` (with -UMDiagReplay): a pregame lobby where you hold seat p0
         // and spectating is on, so the Spectate button shows. Tapping it is answered the way the
         // server does: `ok` = Game.movePlayerToSpectator (playerLeave, self, isSpectator, players,
