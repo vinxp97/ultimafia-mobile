@@ -103,11 +103,90 @@ struct DiagReplayView: View {
             ["id": "m\(phase)-\(n)", "senderId": "p\(n % 12)", "content": "message \(n) in phase \(phase) about the cop and mafia vig claims",
              "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"]
         }
-        // `-UMDiagTopBar pregame|middle|latest`: a static game for screenshots of the header (with
-        // -UMDiagReplay): a real setup strip, a running clock, and the viewed phase at the start,
-        // in the middle (both arrows) or at the newest phase (back arrow only).
+        // `-UMDiagTopBar pregame|middle|latest|overflow|many|many-earliest|many-middle|many-latest|many-post`:
+        // static header screenshots (with -UMDiagReplay). many*: six play phases + Postgame so the
+        // wide strip's max-3 window can be checked at earliest / middle / latest / postgame.
         let args = ProcessInfo.processInfo.arguments
-        // `-UMDiagVotes [act|actbottom|chat]` (with -UMDiagReplay): a Day with four actions and long
+        // `-UMDiagJoinOrder [livefirst|historyfirst|liveafter|duphistory]`: lobby join chronology.
+        // Server seatPlayer sends the live "X has joined" alert before `history`. The chat UI reads
+        // phases[i].messages; without re-sorting that list after history, the join sticks at the top.
+        // Modes: livefirst (default race), historyfirst (history then join at end), liveafter (history
+        // then a later live chat), duphistory (second history with the same ids must not reshuffle).
+        if let i = args.firstIndex(of: "-UMDiagJoinOrder") {
+            let mode = args.indices.contains(i + 1) ? args[i + 1] : "livefirst"
+            s.debugFeed("self", "p11")
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia", "total": 12,
+                                  "roles": [["Villager:": 6, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Mafioso:": 2, "Serial Killer:": 1]]])
+            let t0 = Date().timeIntervalSince1970 * 1000 - 60_000
+            let tHello = t0 + 10_000
+            let tJoin = t0 + 50_000
+            let tLater = t0 + 70_000
+            func alert(_ id: String, _ content: String, _ time: Double) -> [String: Any] {
+                ["id": id, "senderId": "server", "content": content, "time": time]
+            }
+            func chat(_ id: String, _ sender: String, _ content: String, _ time: Double) -> [String: Any] {
+                ["id": id, "senderId": sender, "content": content, "time": time, "meetingId": "pregame"]
+            }
+            let joinLive = alert("join-vinman", "Vinman has joined.", tJoin)
+            let history: [String: Any] = [
+                "-1": [
+                    "name": "Pregame",
+                    "alerts": [
+                        alert("join-alice", "Alice has joined.", t0),
+                        alert("join-bob", "Bob has joined.", t0 + 5_000),
+                        joinLive,
+                    ],
+                    "meetings": [
+                        "pregame": [
+                            "id": "pregame", "name": "Pregame", "speech": true, "messages": [
+                                chat("m-hello", "p0", "hello lobby", tHello),
+                                chat("m-claim", "p1", "I am claiming Cop", tHello + 5_000),
+                            ],
+                        ],
+                    ],
+                ],
+            ]
+            func writeCheck(_ label: String) {
+                let lines = s.displayedMessages
+                let first = lines.first?.content ?? "-"
+                let last = lines.last?.content ?? "-"
+                let joinIdx = lines.firstIndex(where: { $0.id == "join-vinman" }).map(String.init) ?? "-"
+                let okTop = !(lines.first?.id == "join-vinman")
+                let okPresent = lines.contains(where: { $0.id == "join-vinman" })
+                let line = "JOINCHECK mode=\(mode) label=\(label) count=\(lines.count) joinIdx=\(joinIdx) first=\(first) last=\(last) okTop=\(okTop) okPresent=\(okPresent)"
+                UMDiag.log("replay", line)
+                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    try? (line + "\n").write(to: dir.appendingPathComponent("joincheck.txt"), atomically: true, encoding: .utf8)
+                }
+            }
+            switch mode {
+            case "historyfirst":
+                s.debugFeed("history", history)
+                s.debugFeed("message", joinLive) // duplicate id — ignored; order already from history
+                writeCheck("after")
+            case "liveafter":
+                s.debugFeed("history", history)
+                s.debugFeed("message", chat("m-later", "p2", "anyone there?", tLater))
+                writeCheck("after")
+            case "duphistory":
+                s.debugFeed("message", joinLive)
+                s.debugFeed("history", history)
+                s.debugFeed("history", history) // second pass: all ids already seen
+                s.debugFeed("message", chat("m-later", "p2", "anyone there?", tLater))
+                writeCheck("after")
+            default: // livefirst — the real seatPlayer race
+                s.debugFeed("message", joinLive)
+                writeCheck("before-history")
+                s.debugFeed("history", history)
+                writeCheck("after")
+            }
+            s.debugFeed("meeting", ["id": "pregame", "name": "Pregame", "speech": true, "voting": false,
+                                    "amMember": true, "canTalk": true])
+            s.debugFeed("timerInfo", ["name": "pregameWait", "delay": 600_000])
+            UMDiag.log("replay", "joinorder \(mode)")
+            return
+        }
+                // `-UMDiagVotes [act|actbottom|chat]` (with -UMDiagReplay): a Day with four actions and long
         // names for the Act tab and the chat vote log. Server order puts the Gun first; it should
         // be listed last (true item). `act` opens on Act, `actbottom` also scrolls to the end.
         if args.contains("-UMDiagVotes") {
@@ -266,6 +345,160 @@ struct DiagReplayView: View {
             UMDiag.log("replay", "replies")
             return
         }
+        // `-UMDiagHistoricalReply` (with -UMDiagReplay): seated on Day 2 with Day 1 history.
+        // Asserts quote / reply / speak / cancel / own-echo / denied-night / phase-step while
+        // browsing Day 1 never force the live day; leaves Day 1 on screen with Replying-to bar
+        // for a screenshot. No real network sends (debugSendHook only).
+        if args.contains("-UMDiagHistoricalReply") {
+            let t0 = Date().timeIntervalSince1970 * 1000 - 300_000
+            s.debugFeed("players", players)
+            s.debugFeed("connected", nil)
+            s.debugFeed("self", "p0")
+            s.debugFeed("isSpectator", false)
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Guns n Hookers", "gameType": "Mafia", "total": 12,
+                                  "roles": [["Villager:": 6, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Mafioso:": 2, "Serial Killer:": 1]]])
+            s.debugFeed("options", ["spectating": true])
+            s.debugFeed("state", ["id": 0, "name": "Day", "dayCount": 1])
+            s.debugFeed("message", ["id": "d1-a", "senderId": "p3", "content": "day one claim: I am Cop",
+                                    "time": t0, "meetingId": "village0"])
+            s.debugFeed("message", ["id": "d1-b", "senderId": "p4", "content": "ok trust the Cop for now",
+                                    "time": t0 + 5_000, "meetingId": "village0"])
+            s.debugFeed("state", ["id": 1, "name": "Night", "dayCount": 1])
+            s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 2])
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn", "speech": true,
+                                    "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                    "targets": (0..<12).map { "p\($0)" } + ["*"], "votes": [String: Any]()])
+            s.debugFeed("message", ["id": "d2-a", "senderId": "p5", "content": "day two: who to vote?",
+                                    "time": t0 + 120_000, "meetingId": "village"])
+            s.debugFeed("timerInfo", ["name": "main", "delay": 240_000])
+            var sent: [(String, [String: Any])] = []
+            s.debugSendHook = { event, payload in
+                sent.append((event, payload))
+            }
+            GameMusic.stop()
+
+            func expect(_ cond: Bool, _ label: String) {
+                if cond { UMDiag.log("histReply", "PASS \(label)") }
+                else { UMDiag.log("histReply", "FAIL \(label)") }
+            }
+
+            let day1 = 0
+            let live = 2
+            expect(s.currentPhaseId == live, "live is Day 2")
+            s.viewPhase(day1)
+            expect(s.viewingPhaseId == day1 && !s.isViewingLive && !s.followLive, "browsing Day 1")
+            expect(s.showComposer, "composer visible while browsing history")
+            let prior = s.displayedMessages.first(where: { $0.id == "d1-a" })
+            expect(prior != nil, "Day 1 line present")
+            guard let prior else {
+                UMDiag.log("replay", "historical-reply setup missing d1-a")
+                return
+            }
+            let anchorBefore = s.phaseScrollAnchors[day1]
+
+            // Single-tap reply: stay put + Replying-to target.
+            let pending = s.chatLineTapped(prior, at: Date())
+            expect(pending == .pendingReply, "tap queues pending reply")
+            // Advance past double-tap window so the reply bar commits.
+            try? await Task.sleep(for: .milliseconds(350))
+            expect(s.replyTarget?.id == prior.id, "reply target set")
+            expect(s.viewingPhaseId == day1 && !s.followLive, "reply keeps Day 1")
+            expect(s.phaseScrollAnchors[day1] == anchorBefore, "reply leaves scroll anchor")
+
+            // Cancel reply: still on Day 1.
+            s.cancelReply()
+            expect(s.replyTarget == nil && s.replyHighlightId == nil, "cancel clears reply")
+            expect(s.viewingPhaseId == day1, "cancel stays on Day 1")
+
+            // Plain speak while browsing: destination is live village, view stays.
+            sent.removeAll()
+            expect(s.speak("watching yesterday still"), "plain speak allowed")
+            expect(s.viewingPhaseId == day1, "plain speak stays on Day 1")
+            expect(sent.contains(where: { $0.0 == "speak" }), "speak event emitted")
+            if let speak = sent.first(where: { $0.0 == "speak" })?.1 {
+                expect((speak["meetingId"] as? String) == "village", "speak targets live village")
+            }
+
+            // Re-queue reply and send it.
+            _ = s.chatLineTapped(prior, at: Date())
+            try? await Task.sleep(for: .milliseconds(350))
+            sent.removeAll()
+            expect(s.speak("quoting day one from here"), "reply speak allowed")
+            expect(s.viewingPhaseId == day1, "reply send stays on Day 1")
+            expect(s.replyTarget == nil, "reply cleared after send")
+            expect(sent.contains(where: { $0.0 == "reply" }), "reply event emitted")
+            if let reply = sent.first(where: { $0.0 == "reply" })?.1,
+               let quote = reply["quote"] as? [String: Any],
+               let message = reply["message"] as? [String: Any] {
+                expect((quote["messageId"] as? String) == "d1-a", "reply quotes Day 1 line")
+                expect((quote["toMeetingId"] as? String) == "village", "reply toMeeting is live")
+                expect((message["meetingId"] as? String) == "village", "reply body to live village")
+                expect((message["content"] as? String) == "quoting day one from here", "reply content")
+            }
+
+            // Own echo into live day must not yank the browse selection.
+            let echoT = Date().timeIntervalSince1970 * 1000
+            s.debugFeed("quote", ["id": "eq-own", "messageId": "d1-a", "senderId": "p0",
+                                  "toMeetingId": "village", "fromMeetingId": "village0",
+                                  "fromState": 0, "time": echoT])
+            s.debugFeed("message", ["id": "er-own", "senderId": "p0", "content": "quoting day one from here",
+                                    "time": echoT + 1, "meetingId": "village", "replyTo": "eq-own"])
+            expect(s.viewingPhaseId == day1, "own echo stays on Day 1")
+            expect(s.displayedMessages.contains(where: { $0.id == "d1-a" }), "still showing Day 1 lines")
+
+            // Double-tap quote: must NOT jump (the original bug).
+            let now = Date()
+            _ = s.chatLineTapped(prior, at: now)
+            sent.removeAll()
+            let quoted = s.chatLineTapped(prior, at: now.addingTimeInterval(0.05))
+            expect(quoted == .quoted, "double tap quotes")
+            expect(s.viewingPhaseId == day1 && !s.followLive, "quote keeps Day 1 (no jump)")
+            expect(sent.contains(where: { $0.0 == "quote" }), "quote event emitted")
+            if let q = sent.first(where: { $0.0 == "quote" })?.1 {
+                expect((q["toMeetingId"] as? String) == "village", "quote toMeeting is live")
+                expect((q["messageId"] as? String) == "d1-a", "quote messageId")
+            }
+
+            // Night with no speakable meeting: draft-only / denied send while browsing Day 1.
+            s.debugFeed("state", ["id": 3, "name": "Night", "dayCount": 2])
+            // Drop speech meetings so canTalk is false (live night).
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "speech": false, "voting": false,
+                                    "amMember": true, "canTalk": false, "canVote": false,
+                                    "targets": [String](), "votes": [String: Any]()])
+            s.viewPhase(day1)
+            expect(s.currentPhaseId == 3 && s.viewingPhaseId == day1, "night live, browsing Day 1")
+            expect(s.isDraftOnly || !s.canTalk, "cannot speak at night")
+            expect(s.isDraftOnly || !(s.canTalk || s.speechChannels.contains(where: { $0.canTalk })),
+                   "night has no speakable meeting")
+            expect(!s.speak("should not send at night"), "night send denied")
+            expect(s.viewingPhaseId == day1, "denied send stays on Day 1")
+
+            // Restore a talkable Day so composer + reply bar work for the screenshot.
+            s.debugFeed("state", ["id": 4, "name": "Day", "dayCount": 3])
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn", "speech": true,
+                                    "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                    "targets": (0..<12).map { "p\($0)" } + ["*"], "votes": [String: Any]()])
+            s.viewPhase(day1)
+            expect(s.followLive == false && s.viewingPhaseId == day1, "explicit Day 1 after live day advance")
+            _ = s.chatLineTapped(prior, at: Date())
+            try? await Task.sleep(for: .milliseconds(350))
+            expect(s.replyTarget?.id == prior.id && s.viewingPhaseId == day1, "screenshot: reply on Day 1")
+
+            // Live path still follows when viewing live.
+            s.viewLivePhase()
+            expect(s.isViewingLive && s.followLive, "viewLive restores follow")
+            let liveCount = s.displayedMessages.count
+            s.debugFeed("message", ["id": "live-new", "senderId": "p6", "content": "new on live day",
+                                    "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"])
+            expect(s.displayedMessages.count == liveCount + 1, "live autoscroll source grows")
+            // Back to Day 1 with reply for the capture.
+            s.viewPhase(day1)
+            _ = s.chatLineTapped(prior, at: Date())
+            try? await Task.sleep(for: .milliseconds(350))
+            GameMusic.stop()
+            UMDiag.log("replay", "historical-reply ready (Day 1 + replying bar)")
+            return
+        }
         if let i = args.firstIndex(of: "-UMDiagSpecChat") {
             let mode = args.indices.contains(i + 1) ? args[i + 1] : "pregame"
             let t0 = Date().timeIntervalSince1970 * 1000 - 120_000
@@ -364,6 +597,7 @@ struct DiagReplayView: View {
         }
         if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
             let mode = args[i + 1]
+            let many = mode.hasPrefix("many")
             // `overflow`: a 20-player setup with 16 distinct roles, more than the header can fit.
             let roles: [String: Int] = mode == "overflow"
                 ? ["Villager:": 3, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1, "Hooker:": 1, "Vigilante:": 1,
@@ -376,6 +610,26 @@ struct DiagReplayView: View {
             if mode == "pregame" || mode == "overflow" {
                 s.debugFeed("timerInfo", ["name": "pregameCountdown", "delay": 154_000])
                 for n in 0..<12 { s.debugFeed("message", msg(n, phase: -1)) }
+            } else if many {
+                // Pregame is already present as id -1; add Day/Night through Day 3, then Postgame.
+                let play: [(Int, String, Int)] = [
+                    (0, "Day", 1), (1, "Night", 1), (2, "Day", 2), (3, "Night", 2),
+                    (4, "Day", 3), (5, "Night", 3)
+                ]
+                let count = args.contains("-UMDiagLong") ? 40 : 6
+                for (id, name, day) in play {
+                    s.debugFeed("state", ["id": id, "name": name, "dayCount": day])
+                    for n in 0..<count { s.debugFeed("message", msg(n, phase: id)) }
+                }
+                s.debugFeed("state", ["id": -2, "name": "Postgame"])
+                for n in 0..<4 { s.debugFeed("message", msg(n, phase: -2)) }
+                s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                switch mode {
+                case "many-earliest": s.viewPhase(-1)         // Pregame — absolute earliest (first three)
+                case "many-middle": s.viewPhase(2)            // Day 2 — has before and after
+                case "many-post", "many-latest", "many": s.viewPhase(-2)
+                default: s.viewPhase(-2)
+                }
             } else {
                 for (id, name) in [(0, "Day"), (1, "Night"), (2, "Day")] {
                     s.debugFeed("state", ["id": id, "name": name, "dayCount": id / 2 + 1])

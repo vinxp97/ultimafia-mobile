@@ -487,7 +487,10 @@ final class GameSession {
     var showComposer: Bool {
         // Spectators talk in Pregame before the start and in the Spectator Meeting (Spectator.js
         // canSpeakIn); canTalk encodes that. No spectator chat once the game is over.
-        guard !isReview, isViewingLive else { return false }
+        // Composer stays up while browsing a prior phase so reply / quote / send can happen without
+        // forcing navigation back to the live day; speak()/quote()/reply still target the live
+        // writable meeting.
+        guard !isReview else { return false }
         if spectate && (finished || currentPhaseId == -2) { return false }
         return canTalk || speechChannels.contains(where: { $0.canTalk }) || isDraftOnly
     }
@@ -514,7 +517,9 @@ final class GameSession {
     /// night): the composer stays up so they can prepare a message, but nothing is sent and no
     /// typing events go out. The draft lives in the game view, so it survives into the next phase.
     var isDraftOnly: Bool {
-        guard !isReview, isViewingLive, !spectate, isGameInProgress, !finished,
+        // Based on live speakability, not which phase is on screen — drafting at night while
+        // reading yesterday must not hide the composer or kick the user forward.
+        guard !isReview, !spectate, isGameInProgress, !finished,
               let me = selfId, players.contains(where: { $0.id == me }) else { return false }
         return !(canTalk || speechChannels.contains(where: { $0.canTalk }))
     }
@@ -999,7 +1004,9 @@ final class GameSession {
 
     func noteTyping() {
         guard !typingSuppressed, !isDraftOnly else { return }
-        guard isViewingLive, !spectate, canTalk else { return }
+        // Typing is always for the live speak meeting; browsing a prior day must not block it
+        // or navigate away from that day.
+        guard !spectate, canTalk else { return }
         guard currentSpeechOption.abilityName == nil else { return }
         let selected = speechChannels.first(where: { $0.id == selectedSpeechMeetingId && $0.canTalk })?.id
         let meetingId = selected
@@ -1151,9 +1158,8 @@ final class GameSession {
 
     func quote(_ line: ChatLine) {
         guard canQuote(line) else { return }
-        if !isViewingLive {
-            viewLivePhase()
-        }
+        // Do not jump to the live day — user stays on the phase they are reading; the quote still
+        // posts into the current writable live meeting (same destination as speak/reply).
         let to = (spectate ? speakTargetId : nil)
             ?? selectedSpeechMeetingId
             ?? speechChannels.first(where: { $0.canTalk })?.id
@@ -1766,7 +1772,16 @@ final class GameSession {
         ingestBuffer = lines
         for line in lines { appendLine(line) }
         ingestBuffer = []
+        // Chat UI reads `phases[i].messages` (not the flat `messages` list). A live
+        // "X has joined" can arrive before `history` (server seatPlayer: sendPlayerJoin
+        // then sendAllGameInfo). History appends older lines after that join and only
+        // re-sorted `messages`, leaving the join stuck at the top of the phase list.
+        // Re-sort each phase the same way — by known `time` only; do not invent order
+        // for equal timestamps beyond a stable sort.
         messages.sort { $0.time < $1.time }
+        for i in phases.indices {
+            phases[i].messages.sort { $0.time < $1.time }
+        }
         adoptKnownRolesForSelf()
         persistRoleMarks()
         fillPaperReveals()
