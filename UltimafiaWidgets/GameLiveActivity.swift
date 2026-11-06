@@ -47,6 +47,7 @@ struct GameLiveActivity: Widget {
                         CountdownText(state: s)
                             .font(.title2.weight(.semibold).monospacedDigit())
                             .foregroundStyle(s.atKicks ? kickRed : .white)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .padding(.horizontal, 6)
                     }
@@ -55,16 +56,26 @@ struct GameLiveActivity: Widget {
                 PhaseIcon(state: s)
             } compactTrailing: {
                 if s.isPregame {
-                    PregameCount(state: s).font(.caption.weight(.semibold))
+                    PregameCount(state: s)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 } else {
-                HStack(spacing: 4) {
-                    CountdownText(state: s)
-                        .font(.caption2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(s.atKicks ? kickRed : .white)
-                        .frame(maxWidth: 40)
-                    ClockRing(state: s, lineWidth: 2.5)
-                        .frame(width: 16, height: 16)
-                }
+                    // Prefer countdown+ring; if the trailing slot is too narrow (Duo vertical
+                    // island), drop the ring before the digits so "m:ss" / "mm:ss" stay readable.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 3) {
+                            CountdownText(state: s)
+                                .font(.caption2.weight(.semibold).monospacedDigit())
+                                .foregroundStyle(s.atKicks ? kickRed : .white)
+                            ClockRing(state: s, lineWidth: 2.5)
+                                .frame(width: 14, height: 14)
+                                .fixedSize()
+                        }
+                        CountdownText(state: s)
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(s.atKicks ? kickRed : .white)
+                    }
                 }
             } minimal: {
                 if s.isPregame || s.isReadyCheck {
@@ -156,15 +167,21 @@ private struct PhaseLabel: View {
 }
 
 /// Counts down by itself from the phase end date.
+/// Always a single line: a narrow Dynamic Island trailing slot (Duo vertical island) used to wrap
+/// "7:26" into stacked digits ("7" / "6") when multiline was allowed inside a tiny maxWidth.
 private struct CountdownText: View {
     let state: UMGameActivityAttributes.ContentState
     var body: some View {
-        if let end = state.clockEnd, end > Date() {
-            Text(timerInterval: (state.clockStart ?? Date())...end, countsDown: true)
-                .multilineTextAlignment(.trailing)
-        } else {
-            Text("--:--")
+        Group {
+            if let end = state.clockEnd, end > Date() {
+                Text(timerInterval: (state.clockStart ?? Date())...end, countsDown: true)
+            } else {
+                Text("--:--")
+            }
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.6)
+        .multilineTextAlignment(.trailing)
     }
 }
 
@@ -195,9 +212,55 @@ private struct ClockRing: View {
     }
 }
 
+private enum LAPreviewClock {
+    /// Shared anchor so "7:26" / "0:09" / "12:05" are exact at preview open.
+    static let now = Date()
+    static func end(minutes: Int, seconds: Int) -> Date {
+        now.addingTimeInterval(TimeInterval(minutes * 60 + seconds))
+    }
+}
+
 #Preview("Lock Screen", as: .content, using: UMGameActivityAttributes(gameId: "x", setupName: "Classic 7")) {
     GameLiveActivity()
 } contentStates: {
-    UMGameActivityAttributes.ContentState(phaseName: "Day 2", isNight: false, clockStart: .now, clockEnd: .now + 300, atKicks: false)
-    UMGameActivityAttributes.ContentState(phaseName: "Day 3", isNight: false, clockStart: .now, clockEnd: .now + 60, atKicks: true)
+    UMGameActivityAttributes.ContentState(phaseName: "Day 2", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 7, seconds: 26), atKicks: false)
+    UMGameActivityAttributes.ContentState(phaseName: "Day 3", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 0, seconds: 45), atKicks: true)
+    UMGameActivityAttributes.ContentState(phaseName: "Night 1", isNight: true,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 12, seconds: 5), atKicks: false)
+    UMGameActivityAttributes.ContentState(phaseName: "5/12", isNight: false,
+                                          clockStart: nil, clockEnd: nil, atKicks: false, stage: "pregame")
+}
+
+#Preview("Island Compact 7:26", as: .dynamicIsland(.compact), using: UMGameActivityAttributes(gameId: "x", setupName: "Classic 7")) {
+    GameLiveActivity()
+} contentStates: {
+    UMGameActivityAttributes.ContentState(phaseName: "Day 1", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 7, seconds: 26), atKicks: false)
+}
+
+#Preview("Island Compact narrow digits", as: .dynamicIsland(.compact), using: UMGameActivityAttributes(gameId: "x", setupName: "Classic 7")) {
+    GameLiveActivity()
+} contentStates: {
+    UMGameActivityAttributes.ContentState(phaseName: "Day 1", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 0, seconds: 9), atKicks: false)
+    UMGameActivityAttributes.ContentState(phaseName: "Night 2", isNight: true,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 59, seconds: 59), atKicks: false)
+    UMGameActivityAttributes.ContentState(phaseName: "Day 3", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: nil, atKicks: false)
+}
+
+#Preview("Island Minimal", as: .dynamicIsland(.minimal), using: UMGameActivityAttributes(gameId: "x", setupName: "Classic 7")) {
+    GameLiveActivity()
+} contentStates: {
+    UMGameActivityAttributes.ContentState(phaseName: "Day 1", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 7, seconds: 26), atKicks: false)
+}
+
+#Preview("Island Expanded", as: .dynamicIsland(.expanded), using: UMGameActivityAttributes(gameId: "x", setupName: "Classic 7")) {
+    GameLiveActivity()
+} contentStates: {
+    UMGameActivityAttributes.ContentState(phaseName: "Day 1", isNight: false,
+                                          clockStart: LAPreviewClock.now, clockEnd: LAPreviewClock.end(minutes: 7, seconds: 26), atKicks: false)
 }
