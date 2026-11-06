@@ -461,7 +461,7 @@ private struct GameHeader: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(-1)
                 if !session.isLiarsDice {
-                    PagedPhaseBar(session: session, visible: 6)
+                    PagedPhaseBar(session: session)
                         .fixedSize()
                 }
             } else {

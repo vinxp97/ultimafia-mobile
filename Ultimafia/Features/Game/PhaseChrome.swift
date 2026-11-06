@@ -1,13 +1,35 @@
 import SwiftUI
 
+/// Start index of the phase-chip window: at most `visible` chips, always including the selected
+/// phase. Earliest → first N; latest → last N; otherwise previous / selected / next (centred).
+enum PhaseStripWindow {
+    static func start(selectedIndex: Int, count: Int, visible: Int = 3) -> Int {
+        let v = max(1, visible)
+        guard count > v else { return 0 }
+        let i = min(max(0, selectedIndex), count - 1)
+        return min(max(0, i - (v / 2)), count - v)
+    }
+
+    static func slice<T>(phases: [T], selectedIndex: Int, visible: Int = 3) -> ArraySlice<T> {
+        guard !phases.isEmpty else { return phases[...] }
+        let s = start(selectedIndex: selectedIndex, count: phases.count, visible: visible)
+        let e = min(phases.count, s + max(1, visible))
+        return phases[s..<e]
+    }
+}
+
 struct PhaseBar: View {
     var session: GameSession
+    /// Max chips shown; chevrons still walk every phase.
+    var visible = 3
 
     var body: some View {
         let phases = session.sortedPhases
+        let index = phases.firstIndex { $0.id == session.viewingPhaseId } ?? max(0, phases.count - 1)
+        let window = Array(PhaseStripWindow.slice(phases: phases, selectedIndex: index, visible: visible))
         HStack(spacing: 4) {
             Button {
-                session.viewAdjacentPhase(delta: -1)
+                instantPhase { session.viewAdjacentPhase(delta: -1) }
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.body.weight(.bold))
@@ -16,38 +38,30 @@ struct PhaseBar: View {
             .disabled(phases.first?.id == session.viewingPhaseId)
             .foregroundStyle(phases.first?.id == session.viewingPhaseId ? UMTheme.muted : .white)
 
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(phases) { phase in
-                            Button {
-                                session.viewPhase(phase.id)
-                            } label: {
-                                VStack(spacing: 2) {
-                                    Image(systemName: Self.icon(for: phase.name))
-                                        .font(.title3)
-                                        .foregroundStyle(phase.id == session.viewingPhaseId ? UMTheme.blood : UMTheme.muted)
-                                        .frame(width: 32, height: 28)
-                                    Text(Self.shortLabel(phase))
-                                        .font(.caption2.weight(phase.id == session.viewingPhaseId ? .bold : .regular))
-                                        .foregroundStyle(phase.id == session.viewingPhaseId ? .white : UMTheme.muted)
-                                        .lineLimit(1)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .id(phase.id)
-                            .opacity(phase.id == session.viewingPhaseId ? 1 : 0.55)
+            HStack(spacing: 10) {
+                ForEach(window) { phase in
+                    Button {
+                        instantPhase { session.viewPhase(phase.id) }
+                    } label: {
+                        VStack(spacing: 2) {
+                            Image(systemName: Self.icon(for: phase.name))
+                                .font(.title3)
+                                .foregroundStyle(phase.id == session.viewingPhaseId ? UMTheme.blood : UMTheme.muted)
+                                .frame(width: 32, height: 28)
+                            Text(Self.shortLabel(phase))
+                                .font(.caption2.weight(phase.id == session.viewingPhaseId ? .bold : .regular))
+                                .foregroundStyle(phase.id == session.viewingPhaseId ? .white : UMTheme.muted)
+                                .lineLimit(1)
                         }
                     }
-                    .padding(.horizontal, 4)
-                }
-                .onChange(of: session.viewingPhaseId) { _, id in
-                    proxy.scrollTo(id, anchor: .center)
+                    .buttonStyle(.plain)
+                    .opacity(phase.id == session.viewingPhaseId ? 1 : 0.55)
                 }
             }
+            .transaction { $0.animation = nil }
 
             Button {
-                session.viewAdjacentPhase(delta: 1)
+                instantPhase { session.viewAdjacentPhase(delta: 1) }
             } label: {
                 Image(systemName: "chevron.right")
                     .font(.body.weight(.bold))
@@ -59,6 +73,7 @@ struct PhaseBar: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
         .background(UMTheme.card)
+        .transaction { $0.animation = nil }
     }
 
     static func icon(for name: String) -> String {
@@ -82,32 +97,30 @@ struct PhaseBar: View {
     }
 }
 
-/// iPad one-row header: at most `visible` phase chips; chevrons or a horizontal swipe page to
-/// older/newer phases. Follows the newest phase unless the user paged back.
+/// Wide / Duo one-row header: at most `visible` phase chips (default 3) centred on the viewed
+/// phase so the setup roles keep room. Chevrons and a sideways strip drag change phase instantly
+/// (no window slide animation); every phase stays reachable.
 struct PagedPhaseBar: View {
     var session: GameSession
-    var visible = 6
-    /// nil = pinned to the newest page.
-    @State private var start: Int?
+    var visible = 3
 
     var body: some View {
         let phases = session.sortedPhases
-        let maxStart = max(0, phases.count - visible)
-        let s = min(start ?? maxStart, maxStart)
-        let window = phases.isEmpty ? [] : Array(phases[s..<min(phases.count, s + visible)])
+        let index = phases.firstIndex { $0.id == session.viewingPhaseId } ?? max(0, phases.count - 1)
+        let window = Array(PhaseStripWindow.slice(phases: phases, selectedIndex: index, visible: visible))
         HStack(spacing: 2) {
-            Button { page(-1, s, maxStart) } label: {
+            Button { instantPhase { session.viewAdjacentPhase(delta: -1) } } label: {
                 Image(systemName: "chevron.left").font(.footnote.weight(.bold)).frame(width: 22, height: 32)
             }
             .buttonStyle(.plain)
-            .disabled(s == 0)
-            .foregroundStyle(s == 0 ? UMTheme.muted.opacity(0.4) : .white)
-            .accessibilityLabel("Older phases")
+            .disabled(phases.first?.id == session.viewingPhaseId)
+            .foregroundStyle(phases.first?.id == session.viewingPhaseId ? UMTheme.muted.opacity(0.4) : .white)
+            .accessibilityLabel("Previous phase")
 
             HStack(spacing: 8) {
                 ForEach(window) { phase in
                     let on = phase.id == session.viewingPhaseId
-                    Button { session.viewPhase(phase.id) } label: {
+                    Button { instantPhase { session.viewPhase(phase.id) } } label: {
                         VStack(spacing: 1) {
                             Image(systemName: PhaseBar.icon(for: phase.name))
                                 .font(.body)
@@ -127,38 +140,32 @@ struct PagedPhaseBar: View {
             .contentShape(Rectangle())
             .simultaneousGesture(
                 DragGesture(minimumDistance: 20).onEnded { v in
-                    if v.translation.width < -30 { page(1, s, maxStart) }
-                    else if v.translation.width > 30 { page(-1, s, maxStart) }
+                    if v.translation.width < -30 {
+                        instantPhase { session.viewAdjacentPhase(delta: 1) }
+                    } else if v.translation.width > 30 {
+                        instantPhase { session.viewAdjacentPhase(delta: -1) }
+                    }
                 }
             )
-            .animation(.snappy(duration: 0.2), value: s)
+            .transaction { $0.animation = nil }
 
-            Button { page(1, s, maxStart) } label: {
+            Button { instantPhase { session.viewAdjacentPhase(delta: 1) } } label: {
                 Image(systemName: "chevron.right").font(.footnote.weight(.bold)).frame(width: 22, height: 32)
             }
             .buttonStyle(.plain)
-            .disabled(s >= maxStart)
-            .foregroundStyle(s >= maxStart ? UMTheme.muted.opacity(0.4) : .white)
-            .accessibilityLabel("Newer phases")
+            .disabled(phases.last?.id == session.viewingPhaseId)
+            .foregroundStyle(phases.last?.id == session.viewingPhaseId ? UMTheme.muted.opacity(0.4) : .white)
+            .accessibilityLabel("Next phase")
         }
-        .onChange(of: session.viewingPhaseId) { _, id in reveal(id) }
+        .transaction { $0.animation = nil }
     }
+}
 
-    private func page(_ delta: Int, _ s: Int, _ maxStart: Int) {
-        let n = min(max(0, s + delta * visible), maxStart)
-        start = n >= maxStart ? nil : n
-    }
-
-    /// Keep the viewed phase on screen when it changes elsewhere (bottom arrows, review, live).
-    private func reveal(_ id: Int) {
-        let phases = session.sortedPhases
-        guard let i = phases.firstIndex(where: { $0.id == id }) else { return }
-        let maxStart = max(0, phases.count - visible)
-        let s = min(start ?? maxStart, maxStart)
-        var n = s
-        if i < s { n = i } else if i >= s + visible { n = i - visible + 1 }
-        start = n >= maxStart ? nil : n
-    }
+/// Phase strip / swipe: change the viewed phase in one frame with no slide or fade.
+private func instantPhase(_ body: () -> Void) {
+    var t = Transaction()
+    t.disablesAnimations = true
+    withTransaction(t, body)
 }
 
 struct RoleRevealOverlay: View {
@@ -394,7 +401,7 @@ struct GlassPhaseNavigator: View {
         Menu {
             ForEach(phases) { phase in
                 Button {
-                    session.viewPhase(phase.id)
+                    instantPhase { session.viewPhase(phase.id) }
                 } label: {
                     Label(PhaseBar.shortLabel(phase) + (phase.id == session.currentPhaseId ? " (now)" : ""),
                           systemImage: PhaseBar.icon(for: phase.name))
@@ -430,13 +437,13 @@ struct GlassPhaseNavigator: View {
         .accessibilityHint("Choose a phase to view. Swipe the chat sideways to change phase.")
         .accessibilityAdjustableAction { direction in
             switch direction {
-            case .increment: session.swipeToAdjacentPhase(delta: 1)
-            case .decrement: session.swipeToAdjacentPhase(delta: -1)
+            case .increment: instantPhase { session.swipeToAdjacentPhase(delta: 1) }
+            case .decrement: instantPhase { session.swipeToAdjacentPhase(delta: -1) }
             @unknown default: break
             }
         }
-        .accessibilityAction(named: "Previous phase") { session.swipeToAdjacentPhase(delta: -1) }
-        .accessibilityAction(named: "Next phase") { session.swipeToAdjacentPhase(delta: 1) }
+        .accessibilityAction(named: "Previous phase") { instantPhase { session.swipeToAdjacentPhase(delta: -1) } }
+        .accessibilityAction(named: "Next phase") { instantPhase { session.swipeToAdjacentPhase(delta: 1) } }
         .frame(maxWidth: .infinity)
     }
 }
