@@ -99,6 +99,8 @@ struct VoteMeeting: Identifiable, Hashable {
     var itemName: String?
     /// Server `itemIsTrueItem`: web lists these (Gun, Knife, …) after the regular actions.
     var itemIsTrueItem: Bool = false
+    /// Gun Shoot meeting (real or broken gun; identical to the player).
+    var isGunShoot: Bool { GunMeetingPolicy.isGun(name: name, actionName: actionName, itemName: itemName) }
     /// Web useAction: instant (unless instantButChangeable) or noUnvote meetings lock after voting.
     var instant: Bool = false
     var instantButChangeable: Bool = false

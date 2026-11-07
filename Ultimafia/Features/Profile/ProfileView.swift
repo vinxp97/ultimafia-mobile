@@ -15,6 +15,7 @@ struct ProfileView: View {
     @AppStorage(UMSpeechLM.enabledKey) private var dictationEnabled = false
     @AppStorage("um.playerListSize") private var playerListSize = "compact"
     @AppStorage(UMActLayout.key) private var actLayout = UMActLayout.tabs
+    @AppStorage(ActSelectionPolicy.autoSwitchKey) private var actAutoSwitch = true
     @AppStorage(UMGameStatusBar.key) private var gameStatusBar = UMGameStatusBar.hide
     @AppStorage("um.musicVolume") private var musicVolume = 1.0
     @AppStorage("um.sfxVolume") private var sfxVolume = 1.0
@@ -379,6 +380,15 @@ extension ProfileView {
         settingPicker("Action Layout", caption: "Legacy stacks every action in one scrolling list. Modern switches between actions with tabs.",
                       selection: $actLayout, options: [("Legacy", UMActLayout.stack), ("Modern", UMActLayout.tabs)])
             .id(UMActLayout.key)
+        if actLayout == UMActLayout.tabs {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Jump to Next Action", isOn: $actAutoSwitch)
+                Text("After you vote, Modern switches to the next action waiting on you. Turn off to stay on the action you picked.")
+                    .font(.caption)
+                    .foregroundStyle(UMTheme.muted)
+            }
+            .id(ActSelectionPolicy.autoSwitchKey)
+        }
         #if os(iOS)
         // The Mac (native, or the iPad app on a Mac) has no system status bar to show or hide.
         if !UMPlatformInfo.isMac {

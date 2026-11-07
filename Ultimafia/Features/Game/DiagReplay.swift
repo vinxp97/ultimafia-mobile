@@ -90,7 +90,8 @@ struct DiagReplayView: View {
 
     @MainActor
     private func run() async {
-        let s = GameSession(gameId: "diag-replay", spectate: true)
+        // `-UMDiagShoot` plays a seat (offline: never connects) so its actions are votable.
+        let s = GameSession(gameId: "diag-replay", spectate: !ProcessInfo.processInfo.arguments.contains("-UMDiagShoot"))
         app.game = s
         UMDiag.log("replay", "start")
         var players: [String: Any] = [:]
@@ -184,6 +185,39 @@ struct DiagReplayView: View {
                                     "amMember": true, "canTalk": true])
             s.debugFeed("timerInfo", ["name": "pregameWait", "delay": 600_000])
             UMDiag.log("replay", "joinorder \(mode)")
+            return
+        }
+        // `-UMDiagShoot [fab] [voted]` (with -UMDiagReplay): you (p0) are a Sheriff on Day 2 with the
+        // Village vote and a Gun. `fab`: the gun is a Fabricator's broken gun given later, so the
+        // server renames its meeting "<itemId> 1" (same item, same Shoot action). `voted`: 3 s in the
+        // server echoes your Village vote, which is when Modern used to jump to the gun.
+        if let i = args.firstIndex(of: "-UMDiagShoot") {
+            let rest = Array(args[(i + 1)...])
+            let fab = rest.prefix(2).contains("fab"), voted = rest.prefix(2).contains("voted")
+            let names = ["Vinman", "Alice", "Bob", "Charlie", "Dana", "Eve"]
+            var ps: [String: Any] = [:]
+            for (n, name) in names.enumerated() { ps["p\(n)"] = ["id": "p\(n)", "name": name, "avatar": false, "playerListPosition": n] }
+            s.debugFeed("players", ps)
+            s.debugFeed("self", "p0")
+            s.debugFeed("setup", ["id": "diag-setup", "name": "Sheriff Day", "gameType": "Mafia",
+                                  "roles": [["Villager:": 3, "Sheriff:": 1, "Mafioso:": 2]]])
+            s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 2])
+            let ids = (0..<names.count).map { "p\($0)" }
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                    "speech": true, "voting": true, "amMember": true, "canVote": true, "canUnvote": true,
+                                    "targets": ids + ["*"], "votes": [String: Any]()])
+            s.debugFeed("meeting", ["id": fab ? "gun-b" : "gun-a", "name": fab ? "itm77 1" : "Shoot Gun",
+                                    "actionName": "Shoot", "itemName": "Gun", "itemId": fab ? "itm77" : "itm12",
+                                    "itemIsTrueItem": true, "voting": true, "instant": true, "amMember": true, "canVote": true,
+                                    "targets": ids.filter { $0 != "p0" } + ["*"], "votes": [String: Any]()])
+            s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+            if voted {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    s.debugFeed("vote", ["meetingId": "village", "voterId": "p0", "target": "p3"])
+                    UMDiag.log("replay", "shoot voted village")
+                }
+            }
+            UMDiag.log("replay", "shoot fab=\(fab) voted=\(voted)")
             return
         }
                 // `-UMDiagVotes [act|actbottom|chat]` (with -UMDiagReplay): a Day with four actions and long

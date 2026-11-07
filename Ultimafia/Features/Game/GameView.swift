@@ -17,6 +17,7 @@ struct GameView: View {
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-UMDiagVotes"), args.indices.contains(i + 1), args[i + 1].hasPrefix("act") { return 2 }
         if let i = args.firstIndex(of: "-UMDiagGhost"), args.indices.contains(i + 2), args[i + 2] == "act" { return 2 }
+        if args.contains("-UMDiagShoot") { return 2 }
         #endif
         return 0
     }
@@ -2112,8 +2113,10 @@ private struct GameActPane: View {
         let list = session.meetingsForViewing.filter {
             !$0.isVoteKick && !(session.isLiarsDice && LDState.importantMeetings.contains($0.name))
         }
-        return list.filter { !$0.itemIsTrueItem } + list.filter(\.itemIsTrueItem)
+        let isItem: (VoteMeeting) -> Bool = { $0.itemIsTrueItem || $0.isGunShoot }
+        return list.filter { !isItem($0) } + list.filter(isItem)
     }
+    @AppStorage(ActSelectionPolicy.autoSwitchKey) private var autoSwitch = true
 
     var body: some View {
         ScrollView {
@@ -2132,6 +2135,7 @@ private struct GameActPane: View {
                         MeetingBlock(session: session, meeting: only)
                     } else {
                         meetingSwitcher
+                            .onChange(of: resolution.selected, initial: true) { _, _ in latchSelection() }
                         if let meeting = selected {
                             MeetingBlock(session: session, meeting: meeting)
                                 .id(meeting.id)
@@ -2207,10 +2211,26 @@ private struct GameActPane: View {
 
     /// Tabs: stable selection; default is the first meeting still needing your vote (web
     /// Game.jsx picks `!playerHasVoted && voting && canVote`), else the first meeting.
-    private var selected: VoteMeeting? {
+    private var resolution: (selected: String?, pin: String?) {
         let list = actMeetings
-        if let id = selectedByPhase[phaseKey], let m = list.first(where: { $0.id == id }) { return m }
-        return list.first { $0.canVote && !$0.playerHasVoted && $0.selections(of: session.selfId).isEmpty } ?? list.first
+        let needing = Set(list.filter { $0.canVote && !$0.playerHasVoted && $0.selections(of: session.selfId).isEmpty }.map(\.id))
+        return ActSelectionPolicy.resolve(ids: list.map(\.id), needing: needing,
+                                          pinned: selectedByPhase[phaseKey], autoSwitch: autoSwitch)
+    }
+
+    private var selected: VoteMeeting? {
+        guard let id = resolution.selected else { return nil }
+        return actMeetings.first { $0.id == id }
+    }
+
+    /// Auto-switch off: keep whatever is showing, so a vote doesn't move you to another action.
+    private func latchSelection() {
+        #if DEBUG
+        let list = actMeetings
+        UMDiag.log("act", "tab \(resolution.selected ?? "-") auto=\(autoSwitch) pinned=\(selectedByPhase[phaseKey] ?? "-") m=\(list.map { "\($0.id):cv\($0.canVote ? 1 : 0)hv\($0.playerHasVoted ? 1 : 0)s\($0.selections(of: session.selfId).count)" }) spec=\(session.spectate) self=\(session.selfId ?? "-")")
+        #endif
+        guard tabbed, !autoSwitch, let pin = resolution.pin, selectedByPhase[phaseKey] != pin else { return }
+        selectedByPhase[phaseKey] = pin
     }
 
     private var meetingSwitcher: some View {
@@ -2234,7 +2254,7 @@ private struct GameActPane: View {
     /// Dot marks a live meeting still waiting on your vote.
     private func switcherTitle(_ m: VoteMeeting) -> String {
         let needs = session.isViewingLive && m.canVote && m.selections(of: session.selfId).isEmpty
-        let title = m.name == m.actionName ? m.name : m.actionName
+        let title = m.isGunShoot ? GunMeetingPolicy.title : (m.name == m.actionName ? m.name : m.actionName)
         return needs ? "• " + title : title
     }
 
@@ -2318,6 +2338,7 @@ private struct MeetingBlock: View {
     /// Headline is the server's action name, as on desktop ("Vote to Condemn", "Mafia Kill",
     /// "Shoot", a role's action); the tag says where it comes from (item, else meeting name).
     private var source: String? {
+        if meeting.isGunShoot { return GunMeetingPolicy.source }
         if let item = meeting.itemName, !item.isEmpty { return Self.itemLabel(item) }
         return meeting.name != meeting.actionName ? meeting.name : nil
     }
@@ -2346,7 +2367,7 @@ private struct MeetingBlock: View {
                         .frame(width: 8, height: 8)
                         .accessibilityLabel("Needs your vote")
                 }
-                Text(meeting.actionName)
+                Text(meeting.isGunShoot ? GunMeetingPolicy.title : meeting.actionName)
                     .font(.headline)
                     .lineLimit(2)
                     .minimumScaleFactor(0.8)
@@ -2482,7 +2503,7 @@ private struct MeetingBlock: View {
     /// ("No One", Yes/No, …) in server order. Meetings that only target dead players
     /// (e.g. revive) keep those, in player-list order.
     private var orderedTargets: [String] {
-        let targets = meeting.targets
+        let targets = GunMeetingPolicy.visibleTargets(meeting.targets, isGun: meeting.isGunShoot)
         let playerIds = Set(session.players.map(\.id))
         let alive = session.villagePlayers.map(\.id).filter(targets.contains)
         let others = targets.filter { !playerIds.contains($0) }
@@ -2529,6 +2550,12 @@ private struct MeetingBlock: View {
                 // Names share the row: each shrinks to 70% and then truncates, never past the card.
                 if isPlayer, let p = session.player(for: target) {
                     rowAvatar(p)
+                    if meeting.isGunShoot {
+                        Text(GunMeetingPolicy.targetEmoji)
+                            .font(.system(size: 14))
+                            .fixedSize()
+                            .accessibilityHidden(true)
+                    }
                     rowName(label, color: .white)
                 } else {
                     Text(label)
