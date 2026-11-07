@@ -133,7 +133,7 @@ private struct GameScreen: View {
                 foldY: screenMidY)
             let tabsHiddenForKeyboard = tabsOnKeyboard && keyboardTop != nil
             let keyboardTabs: AnyView? = tabsOnKeyboard
-                ? AnyView(GamePanelPicker(session: session, selectedPanel: $selectedPanel, showsPanelTabs: true))
+                ? AnyView(KeyboardPanelStrip(session: session, selectedPanel: $selectedPanel))
                 : nil
             let topInset = floating ? headerHeight : 0
             // returnToLobby keeps a seated player's connection (the Lobby tab action does the
@@ -729,6 +729,51 @@ private struct GamePanelPicker: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(selectedPanel == tag ? .white : UMTheme.muted)
+    }
+}
+
+/// Slim panel switcher carried by the keyboard (composer accessory) on the Duo inner screen:
+/// Village / Chat / Act only, equal widths, icon + label, the selected one in a glass pill. Guides
+/// stay in the in-app tab row and header. Picking Village or Act leaves the chat, which puts the
+/// keyboard away (GameChatPane), and the full tab row returns.
+private struct KeyboardPanelStrip: View {
+    var session: GameSession
+    @Binding var selectedPanel: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            item("Village", 1, "person.3")
+            item("Chat", 0, "text.bubble")
+            item(session.isLiarsDice ? "Dice" : "Act", 2, session.isLiarsDice ? "die.face.5" : "hand.raised")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 3)
+        .frame(height: 36)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func item(_ title: String, _ tag: Int, _ icon: String) -> some View {
+        let selected = selectedPanel == tag
+        Button { selectedPanel = tag } label: {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .labelStyle(.titleAndIcon)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? .white : UMTheme.muted)
+        .background {
+            if selected {
+                if #available(iOS 26.0, macOS 26.0, *) {
+                    Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
+                } else {
+                    Capsule().fill(UMTheme.elevated)
+                }
+            }
+        }
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

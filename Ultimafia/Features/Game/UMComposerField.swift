@@ -177,7 +177,7 @@ struct UMComposerField: UIViewRepresentable {
                 host.sizingOptions = [.intrinsicContentSize]
                 host.view.autoresizingMask = [.flexibleWidth]
                 let h = host.view.systemLayoutSizeFitting(CGSize(width: tv.window?.bounds.width ?? 400, height: 0)).height
-                host.view.frame = CGRect(x: 0, y: 0, width: tv.window?.bounds.width ?? 400, height: max(44, h))
+                host.view.frame = CGRect(x: 0, y: 0, width: tv.window?.bounds.width ?? 400, height: max(36, h))
                 accessoryHost = host
                 tv.inputAccessoryView = host.view
                 if tv.isFirstResponder { tv.reloadInputViews() }
