@@ -220,6 +220,212 @@ struct DiagReplayView: View {
             UMDiag.log("replay", "votes")
             return
         }
+        // `-UMDiagGhost night|clueother|clue|cluepass|day|dusk|over [act]` (with -UMDiagReplay): a
+        // Mafia game with the Ghost role, events shaped like the server's (Mafia getStateInfo
+        // extraInfo, OuijaBoard Give Clue, the giveClue broadcast, GhostGuessWord). night: you are a
+        // Ghost picking the first clue giver; clueother: Eve's turn; clue: your turn (p0);
+        // cluepass: your turn, then the fixture submits "stallion" through session.vote and the turn
+        // passes to Eve; day: Day 2 with the Village condemn vote; dusk: you are the condemned Ghost
+        // guessing the word; over: Postgame with the word reveal. `act` opens on the Act tab.
+        // Prints a GHOSTCHECK line to stdout (and Documents/ghostcheck.txt) 5 s in (scripts/ghost-sim-test.sh asserts on it).
+        if let i = args.firstIndex(of: "-UMDiagGhost") {
+            let mode = args.indices.contains(i + 1) ? args[i + 1] : "clue"
+            let names = ["Vinman", "Alice", "Bob", "Charlie", "Dana", "Eve", "Frank", "Grace"]
+            var ps: [String: Any] = [:]
+            for (n, name) in names.enumerated() {
+                ps["p\(n)"] = ["id": "p\(n)", "name": name, "avatar": false, "playerListPosition": n]
+            }
+            s.debugFeed("players", ps)
+            s.debugFeed("connected", nil)
+            s.debugFeed("self", "p0")
+            s.debugFeed("isSpectator", false)
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                let line = "GHOSTCHECK mode=\(mode) stage=\(s.ghostStage) turn=\(s.ghostTurn?.name ?? "-") "
+                    + "mine=\(s.isMyGhostTurn) clues=\(s.ghostClues.count) last=\(s.ghostClues.last.map { "\($0.name):\($0.text)" } ?? "-") "
+                    + "word=\(s.ghostMyWord ?? "-") real=\(s.ghostRealWord ?? "-") len=\(s.ghostWordLength ?? 0) "
+                    + "single=\(s.isSingleStateView) ghost=\(s.isGhostGame) panel=\(s.ghostHasContent) "
+                    + "rounds=\(s.ghostClues.map { $0.round.map(String.init) ?? "e" }.joined(separator: "")) "
+                    + "meetings=\(s.meetings.map(\.name).joined(separator: ","))"
+                print(line)
+                fflush(stdout)
+                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    try? (line + "\n").write(to: dir.appendingPathComponent("ghostcheck.txt"), atomically: true, encoding: .utf8)
+                }
+                UMDiag.log("replay", line)
+            }
+            let ids = (0..<names.count).map { "p\($0)" }
+            // Reconnect / replay: one `history` payload. Pranay: currentClueHistory is the game's
+            // one shared array, so every stored state after the first clue serializes ALL clues so
+            // far; states before the first clue have it undefined; giveClue is not re-sent.
+            // replay: alerts present, Dana's turn announced inside Give Clue 2 (expect 11 clues,
+            // no duplicates, rounds 1/2). replaynight: Give Clue 1 alerts trimmed (seeded from
+            // extraInfo), Give Clue 2 just started; Bob's turn was announced in Night 2.
+            // host: Ghost + Host without Poet, no words / wordLength: plain Mafia.
+            if mode == "host" {
+                s.debugFeed("setup", ["id": "diag-ghost-host", "name": "Haunted Hosting", "gameType": "Mafia", "total": 8,
+                                      "roles": [["Villager:": 5, "Ghost:": 2, "Host:": 1]]])
+                s.debugFeed("state", ["id": -1, "name": "Pregame"])
+                s.debugFeed("state", ["id": 0, "name": "Night 1", "dayCount": 1, "extraInfo": ["showGameInfo": false]])
+                s.debugFeed("state", ["id": 1, "name": "Day 1", "dayCount": 1, "extraInfo": ["showGameInfo": false]])
+                s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                        "speech": true, "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                        "targets": ids + ["*"], "votes": [String: Any]()])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                return
+            }
+            s.debugFeed("setup", ["id": "diag-ghost", "name": "Ghost Town", "gameType": "Mafia", "total": 8,
+                                  "roles": [["Villager:": 5, "Ghost:": 2, "Miller:": 1]]])
+            if mode == "replay" || mode == "replaynight" {
+                let night = mode == "replaynight"
+                var t0 = Date().timeIntervalSince1970 * 1000 - 600_000
+                func al(_ id: String, _ text: String) -> [String: Any] {
+                    t0 += 3_000
+                    return ["id": id, "senderId": "server", "content": text, "time": t0]
+                }
+                let r1 = [("Alice", "saddle"), ("Bob", "gallop"), ("Charlie", "stable"), ("Dana", "hay"),
+                          ("Eve", "carriage"), ("Frank", "mane"), ("Grace", "farm"), ("Vinman", "pony")]
+                let r2 = night ? [] : [("Bob", "rider"), ("Charlie", "hooves")]
+                let whole = (r1 + r2).map { "\($0.0): \($0.1)" }
+                let xi: [String: Any] = ["wordLength": 5, "currentClueHistory": whole, "showGameInfo": true]
+                var gc1: [[String: Any]] = []
+                if !night { for (n, c) in r1.enumerated() { gc1.append(al("h1-\(n)", "\(c.0): \(c.1)")) } }
+                var gc2: [[String: Any]] = []
+                for (n, c) in r2.enumerated() { gc2.append(al("h2-\(n)", "\(c.0): \(c.1)")) }
+                if !night { gc2.append(al("h2-turn", "Dana is giving a clue…")) }
+                let history: [String: Any] = [
+                    "-1": ["name": "Pregame", "alerts": [[String: Any]]()],
+                    "0": ["name": "Night 1", "dayCount": 1, "extraInfo": ["wordLength": 5, "showGameInfo": false],
+                          "alerts": [al("hw", "The secret word is: horse."), al("hn1", "Alice is giving a clue…")]],
+                    "1": ["name": "Give Clue 1", "dayCount": 1, "extraInfo": ["wordLength": 5, "currentClueHistory": whole, "showGameInfo": false],
+                          "alerts": gc1],
+                    "2": ["name": "Day 1", "dayCount": 1, "extraInfo": xi,
+                          "alerts": [al("hc", "Clues")] + r1.enumerated().map { al("hr-\($0.offset)", "\($0.element.0): \($0.element.1)") }],
+                    "3": ["name": "Night 2", "dayCount": 2, "extraInfo": xi, "alerts": [al("hn2", "Bob is giving a clue…")]],
+                    "4": ["name": "Give Clue 2", "dayCount": 2, "extraInfo": xi, "alerts": gc2],
+                ]
+                s.debugFeed("history", history)
+                s.debugFeed("timerInfo", ["name": "main", "delay": 77_000])
+                return
+            }
+            var t = Date().timeIntervalSince1970 * 1000 - 400_000
+            func alert(_ id: String, _ text: String) {
+                t += 3_000
+                s.debugFeed("message", ["id": id, "senderId": "server", "content": text, "time": t])
+            }
+            func say(_ id: String, _ from: String, _ text: String, _ meeting: String) {
+                t += 3_000
+                s.debugFeed("message", ["id": id, "senderId": from, "content": text, "time": t, "meetingId": meeting])
+            }
+            let ghostMe = mode == "dusk" || mode == "night"
+            s.debugFeed("state", ["id": -1, "name": "Pregame"])
+            s.debugFeed("state", ["id": 0, "name": "Night 1", "dayCount": 1,
+                                  "extraInfo": ["wordLength": 5, "showGameInfo": false]])
+            alert("w", ghostMe ? "Guess the hidden word of length: 5" : "The secret word is: horse.")
+            if mode == "night" {
+                s.debugFeed("meeting", ["id": "ghostpick", "name": "Ghost", "actionName": "Pick first clue giver",
+                                        "voting": true, "instant": true, "group": true, "mustAct": true,
+                                        "amMember": true, "canVote": true,
+                                        "targets": ids, "votes": ["p4": "p1"]])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 41_000])
+                UMDiag.log("replay", "ghost night")
+                return
+            }
+            alert("pick", "Alice is giving a clue…")
+            s.debugFeed("giveClue", "p1")
+            s.debugFeed("state", ["id": 1, "name": "Give Clue 1", "dayCount": 1,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": [String](), "showGameInfo": false]])
+            let r1 = [("Alice", "saddle"), ("Bob", "gallop"), ("Charlie", "stable"), ("Dana", "hay"),
+                      ("Eve", "carriage"), ("Frank", "mane"), ("Grace", "farm"), ("Vinman", "pony")]
+            for (n, c) in r1.enumerated() { alert("c1-\(n)", "\(c.0): \(c.1)") }
+            s.debugFeed("state", ["id": 2, "name": "Day 1", "dayCount": 1,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": r1.map { "\($0.0): \($0.1)" }, "showGameInfo": true]])
+            say("d1", "p2", "Grace said farm, that's vague", "village1")
+            say("d2", "p7", "farm fits, horses live on farms!", "village1")
+            alert("d3", "No one was condemned.")
+            s.debugFeed("state", ["id": 4, "name": "Night 2", "dayCount": 2,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": r1.map { "\($0.0): \($0.1)" }, "showGameInfo": true]])
+            alert("n2", "Bob is giving a clue…")
+            s.debugFeed("giveClue", "p2")
+            s.debugFeed("state", ["id": 5, "name": "Give Clue 2", "dayCount": 2,
+                                  "extraInfo": ["wordLength": 5, "currentClueHistory": r1.map { "\($0.0): \($0.1)" }, "showGameInfo": true]])
+            let r2 = [("Bob", "rider"), ("Charlie", "hooves"), ("Dana", "barn")]
+            for (n, c) in r2.enumerated() { alert("c2-\(n)", "\(c.0): \(c.1)") }
+            let all = (r1 + r2).map { "\($0.0): \($0.1)" }
+            switch mode {
+            case "day", "dusk", "over":
+                for (n, c) in [("Frank", "neigh"), ("Grace", "race"), ("Vinman", "stallion")].enumerated() {
+                    alert("c3-\(n)", "\(c.0): \(c.1)")
+                }
+                let full = all + ["Frank: neigh", "Grace: race", "Vinman: stallion"]
+                s.debugFeed("state", ["id": 6, "name": "Day 2", "dayCount": 2,
+                                      "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
+                alert("cl", "Clues")
+                say("e1", "p3", "Grace said race twice now, sus", "village")
+                say("e2", "p7", "race is a horse thing!! vote Frank", "village")
+                if mode == "over" {
+                    alert("o1", "Grace has been condemned.")
+                    alert("o2", "Grace guesses horse.")
+                    alert("o3", "The Ghost has successfully guessed the word!")
+                    s.debugFeed("state", ["id": -2, "name": "Postgame",
+                                          "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
+                    alert("o4", "The real word was horse.")
+                    alert("o5", "The fake word was zebra.")
+                } else if mode == "dusk" {
+                    alert("cd", "Vinman has been condemned.")
+                    s.debugFeed("state", ["id": 7, "name": "Dusk 2", "dayCount": 2,
+                                          "extraInfo": ["wordLength": 5, "currentClueHistory": full, "showGameInfo": true]])
+                    s.debugFeed("meeting", ["id": "guess", "name": "Guess Word", "actionName": "Guess Word",
+                                            "voting": true, "instant": true, "amMember": true, "canVote": true,
+                                            "inputType": "text", "itemName": "GhostGuessWord",
+                                            "textOptions": ["minLength": 2, "maxLength": 20, "alphaOnly": true,
+                                                            "toLowerCase": true, "submit": "Confirm"],
+                                            "targets": [String](), "votes": [String: Any]()])
+                    s.debugFeed("timerInfo", ["name": "main", "delay": 52_000])
+                } else {
+                    s.debugFeed("meeting", ["id": "village", "name": "Village", "actionName": "Vote to Condemn",
+                                            "speech": true, "voting": true, "amMember": true, "canTalk": true, "canVote": true,
+                                            "targets": ids + ["*"], "votes": [String: Any]()])
+                    for (voter, target) in [("p1", "p6"), ("p3", "p7"), ("p7", "p6")] {
+                        s.debugFeed("vote", ["meetingId": "village", "voterId": voter, "target": target])
+                    }
+                    s.debugFeed("timerInfo", ["name": "main", "delay": 287_000])
+                }
+            case "clueother":
+                alert("turn", "Eve is giving a clue…")
+                s.debugFeed("giveClue", "p5")
+                s.debugFeed("timerInfo", ["name": "main", "delay": 104_000])
+            default:
+                alert("turn", "Vinman is giving a clue…")
+                s.debugFeed("giveClue", "p0")
+                s.debugFeed("meeting", ["id": "clue", "name": "Give Clue", "actionName": "Give Clue (1-50)",
+                                        "voting": true, "instant": true, "amMember": true, "canVote": true,
+                                        "inputType": "text", "itemName": "Ouija Board",
+                                        "textOptions": ["minLength": 1, "maxLength": 50, "submit": "Confirm"],
+                                        "targets": [String](), "votes": [String: Any]()])
+                s.debugFeed("timerInfo", ["name": "main", "delay": 104_000])
+                // What you submit is answered the way OuijaBoard does: the alert, then the next holder.
+                s.debugSendHook = { [weak s] event, payload in
+                    guard let s, event == "vote", payload["meetingId"] as? String == "clue",
+                          let clue = payload["selection"] as? String else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        alert("mine", "Vinman: \(clue)")
+                        s.debugFeed("leftMeeting", "clue")
+                        alert("next", "Eve is giving a clue…")
+                        s.debugFeed("giveClue", "p5")
+                    }
+                }
+                if mode == "cluepass" {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(2.5))
+                        s.vote(meetingId: "clue", selection: "stallion")
+                    }
+                }
+            }
+            UMDiag.log("replay", "ghost \(mode)")
+            return
+        }
         // `-UMDiagSpectate [ok|fail]` (with -UMDiagReplay): a pregame lobby where you hold seat p0
         // and spectating is on, so the Spectate button shows. Tapping it is answered the way the
         // server does: `ok` = Game.movePlayerToSpectator (playerLeave, self, isSpectator, players,
