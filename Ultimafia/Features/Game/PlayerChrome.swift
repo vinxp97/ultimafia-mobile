@@ -191,6 +191,9 @@ final class UMImageCache: @unchecked Sendable {
                 #endif
                 guard let data = try? await self.data(for: url) else { return nil }
                 let parsed = AnimatedWebPView.decodeFrames(data)
+                #if DEBUG
+                UMDiag.log("img", "decoded \(url.lastPathComponent) bytes=\(data.count) frames=\(parsed.images.count)")
+                #endif
                 guard !parsed.images.isEmpty else { return nil }
                 let e = Entry(parsed.images, parsed.delays)
                 self.memory.setObject(e, forKey: url as NSURL)
@@ -338,14 +341,24 @@ struct AnimatedWebPView: View {
             if let urls = note.userInfo?["urls"] as? [URL], urls.contains(url) { revision += 1 }
         }
         .task(id: "\(url.absoluteString)#\(revision)#\(freeze)") {
-            await load()
-            if freeze { index = 0; return }
-            while !Task.isCancelled, frames.count > 1 {
-                let delay = delays.indices.contains(index) ? delays[index] : 0.1
+            // Drive the loop from what load() returned, not from the @State it just wrote: a
+            // view whose state isn't attached yet (banner/bio images in the profile's scroll)
+            // reads back the empty initial value, so the loop used to exit on frame 0 and the
+            // GIF stayed still while `shownFrames` kept drawing the cached first frame.
+            let loaded = await load()
+            #if DEBUG
+            UMDiag.log("anim", "start \(url.lastPathComponent) frames=\(loaded.images.count) freeze=\(freeze)")
+            #endif
+            index = 0
+            guard !freeze, loaded.images.count > 1 else { return }
+            let count = loaded.images.count
+            var i = 0
+            while !Task.isCancelled {
+                let delay = loaded.delays.indices.contains(i) ? loaded.delays[i] : 0.1
                 try? await Task.sleep(nanoseconds: UInt64(max(delay, 0.04) * 1_000_000_000))
-                await MainActor.run {
-                    if frames.count > 1 { index = (index + 1) % frames.count }
-                }
+                if Task.isCancelled { break }
+                i = (i + 1) % count
+                index = i
             }
         }
     }
@@ -362,22 +375,19 @@ struct AnimatedWebPView: View {
         return sz.width / sz.height
     }
 
-    private func load() async {
+    @discardableResult
+    private func load() async -> (images: [UMPlatformImage], delays: [Double]) {
         let target = url
+        let got: (images: [UMPlatformImage], delays: [Double])
         if let hit = UMImageCache.shared.frames(for: target) {
-            frames = hit.images
-            delays = hit.delays
-            loadedURL = target
-            index = 0
-            return
+            got = hit
+        } else {
+            got = await UMImageCache.shared.loadFrames(for: target) ?? ([], [])
         }
-        let loaded = await UMImageCache.shared.loadFrames(for: target)
-        await MainActor.run {
-            frames = loaded?.images ?? []
-            delays = loaded?.delays ?? []
-            loadedURL = target
-            index = 0
-        }
+        frames = got.images
+        delays = got.delays
+        loadedURL = target
+        return got
     }
 
     static func decodeFrames(_ data: Data) -> (images: [UMPlatformImage], delays: [Double]) {

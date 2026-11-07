@@ -243,6 +243,12 @@ struct ProfileView: View {
                 // `-UMDiagSettings` (with -UMDiagReplay): open on the Action Layout picker for screenshots.
                 guard ProcessInfo.processInfo.arguments.contains("-UMDiagSettings") else { return }
                 try? await Task.sleep(for: .milliseconds(600))
+                // With -UMDiagProfile <userId>: push that public profile (GIF/animation checks).
+                let a = ProcessInfo.processInfo.arguments
+                if let i = a.firstIndex(of: "-UMDiagProfile"), a.indices.contains(i + 1) {
+                    app.youPath.append(.profile(id: a[i + 1], name: a[i + 1]))
+                    return
+                }
                 // With -UMDiagCrash: the Diagnostics (crash reports) section instead.
                 let crash = ProcessInfo.processInfo.arguments.contains("-UMDiagCrash")
                 proxy.scrollTo(crash ? "um.crashReports" : UMActLayout.key, anchor: .center)
