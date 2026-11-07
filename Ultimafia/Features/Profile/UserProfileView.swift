@@ -16,6 +16,7 @@ struct UserProfileView: View {
     @State private var browserItem: UMBrowserItem?
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             if loading {
                 ProgressView()
@@ -31,6 +32,16 @@ struct UserProfileView: View {
                     UMBackendSwitch().padding()
                 }
             }
+        }
+        #if DEBUG
+        .task(id: loading) {
+            // `-UMDiagProfileScrollTo <image file name>`: center that bio image (animation checks).
+            let a = ProcessInfo.processInfo.arguments
+            guard !loading, let i = a.firstIndex(of: "-UMDiagProfileScrollTo"), a.indices.contains(i + 1) else { return }
+            try? await Task.sleep(for: .seconds(1))
+            proxy.scrollTo("bioimg:" + a[i + 1], anchor: .center)
+        }
+        #endif
         }
         .background(pageBackground)
         .navigationTitle("")
@@ -538,6 +549,7 @@ struct UMMarkdownView: View {
                             imageView(url)
                         }
                     }
+                    .id("bioimg:" + url.lastPathComponent)
                 }
             }
         }
