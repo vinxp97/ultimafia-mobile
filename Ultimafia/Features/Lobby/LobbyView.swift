@@ -141,7 +141,7 @@ struct LobbyView: View {
 
     private var seatedBanner: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("YOU'RE IN A GAME")
+            Text(app.spectatingGameId != nil ? "YOU'RE SPECTATING" : "YOU'RE IN A GAME")
                 .font(.caption.weight(.bold))
                 .foregroundStyle(UMTheme.blood)
             Text(UMText.clipped(app.seatedSetupName))

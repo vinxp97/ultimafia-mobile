@@ -233,9 +233,10 @@ private struct GameScreen: View {
     }
 
     private func returnToLobby() {
-        // Only spectators/reviews close their session. Seated players keep the existing
-        // connection and its chat/phase memory, exactly like the main Lobby tab action.
-        if session.isReview || session.spectate { onDetach() }
+        // Reviews close. Seated players and spectators keep the connection (web Main hides the
+        // hosted Game rather than unmounting it); the lobby offers Return / Leave Game, and only
+        // Leave sends "leave" (Spectator.leaveGame) to drop the spectator membership.
+        if session.isReview { onDetach() }
         else { app.goToLobby() }
     }
 
