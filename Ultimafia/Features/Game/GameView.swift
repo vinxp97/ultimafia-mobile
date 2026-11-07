@@ -157,7 +157,8 @@ private struct GameScreen: View {
                                 chatFocused: chatFocused,
                                 showsPhaseBar: false,
                                 isOnScreen: selectedPanel == 0,
-                                topInset: topInset
+                                topInset: topInset,
+                                clipsAboveComposer: bandTop != nil
                             )
                             .opacity(selectedPanel == 0 ? 1 : 0)
                             .allowsHitTesting(selectedPanel == 0)
@@ -732,12 +733,18 @@ private struct GameChatPane: View {
     /// Room for the floating glass header: the transcript scrolls under it, but its first line,
     /// "top" and the jump buttons sit below it.
     var topInset: CGFloat = 0
+    /// Half-folded Duo: the pane is short, so nothing is drawn under the composer, the join bar or
+    /// the scroll-to-latest pill; the transcript is clipped above them (and the pill gets its own
+    /// strip) instead of scrolling under the translucent controls.
+    var clipsAboveComposer = false
     @AppStorage("um.chatLayout") private var chatLayout: ChatLayout = .standard
     @AppStorage("um.showTypingIndicator") private var showTypingIndicator = true
     @AppStorage("um.showVotingLog") private var showVotingLog = true
     @State private var transcriptScroll = UMTranscriptScrollController()
     @State private var unreadCount = 0
     @State private var composerOverlayHeight: CGFloat = 0
+    /// Strip kept clear for the scroll-to-latest pill when the transcript is clipped (pill + gaps).
+    private let latestPillStrip: CGFloat = 40
     @State private var visibleLineIds: Set<String> = []
     @State private var visibleBuffer = VisibleIdBuffer()
     /// Phase whose rows the scroll tracking belongs to. Only changed by the phase-switch handler, so
@@ -889,6 +896,14 @@ private struct GameChatPane: View {
                 .contentMargins(.bottom, composerOverlayHeight, for: .scrollContent)
                 .contentMargins(.top, topInset, for: .scrollContent)
                 .contentMargins(.top, topInset, for: .scrollIndicators)
+                .mask(alignment: .top) {
+                    if clipsAboveComposer {
+                        let pill: CGFloat = (!transcriptScroll.isAtBottom && !session.isReview) ? latestPillStrip : 0
+                        Color.black.padding(.bottom, composerOverlayHeight + pill)
+                    } else {
+                        Color.black
+                    }
+                }
                 .scrollDismissesKeyboard(.interactively)
                 // No floating scroll-to-top button: tapping the clock in the header does it
                 // (session.chatJumpTopTick, same as Option+Up).
@@ -924,7 +939,7 @@ private struct GameChatPane: View {
                                     .background(UMTheme.blood, in: Capsule())
                             }
                             .buttonStyle(.plain)
-                            .padding(.bottom, composerOverlayHeight + 8)
+                            .padding(.bottom, composerOverlayHeight + (clipsAboveComposer ? 4 : 8))
                             .accessibilityLabel(unreadCount > 0 ? "\(unreadCount) unseen messages, scroll to latest" : "Scroll to latest message")
                         }
                 }

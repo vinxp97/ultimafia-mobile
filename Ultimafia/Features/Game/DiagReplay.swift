@@ -366,6 +366,10 @@ struct DiagReplayView: View {
                 }
             }
             UMDiag.log("replay", "replies")
+            if args.contains("-UMDiagClockTap") {
+                try? await Task.sleep(for: .seconds(5))
+                s.chatJumpTopTick &+= 1
+            }
             return
         }
         // `-UMDiagHistoricalReply` (with -UMDiagReplay): seated on Day 2 with Day 1 history.
