@@ -236,7 +236,7 @@ private struct GameScreen: View {
         // Reviews close. Seated players and spectators keep the connection (web Main hides the
         // hosted Game rather than unmounting it); the lobby offers Return / Leave Game, and only
         // Leave sends "leave" (Spectator.leaveGame) to drop the spectator membership.
-        if session.isReview { onDetach() }
+        if GameEntryPolicy.backClosesSession(session.entryState) { onDetach() }
         else { app.goToLobby() }
     }
 

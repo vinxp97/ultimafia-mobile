@@ -106,8 +106,7 @@ final class AppModel {
     /// Live spectator session the shell is keeping while the lobby is shown (web Main keeps the
     /// hosted Game mounted, hidden, until it leaves). Spectators are never in redis inGame.
     var spectatingGameId: String? {
-        guard let g = game, g.spectate, !g.isReview, !g.finished, user?.inGameId != g.gameId else { return nil }
-        return g.gameId
+        GameEntryPolicy.spectatingGameId(inGameId: user?.inGameId, current: game?.entryState)
     }
 
     /// Any current game session: pregame or started, seated or spectating, until it's actually left
@@ -464,7 +463,7 @@ final class AppModel {
         guard let id = seatedGameId else { return }
         // Return restores the role the session already has (web: navigate back to the hosted
         // /game/:id, same socket); a spectator is never re-joined as a player.
-        resumeGame(id, spectate: game?.gameId == id ? (game?.spectate ?? false) : false)
+        resumeGame(id, spectate: GameEntryPolicy.returnRole(target: id, current: game?.entryState))
     }
 
     func resumeIfSeated() {
@@ -476,31 +475,24 @@ final class AppModel {
         // Being seated is server state, and every entry point (join, spectate, host, resume)
         // funnels through here, so this is the one place that can refuse to start a second game
         // over a live one. Leaving is an explicit, confirmed action and is never a side effect.
-        // Only a seat (or a seated session) blocks: a spectator session is replaced by a new lobby
-        // entry, as on the web, where a different game mounts a new hosted session.
-        let blocking = user?.inGameId ?? (game?.spectate == false ? game?.gameId : nil)
-        if let seated = blocking, seated != id {
+        switch GameEntryPolicy.decide(target: id, spectate: spectate, inGameId: user?.inGameId, current: game?.entryState) {
+        case .refuse:
             alertMessage = spectate
                 ? "You're already in a game. Leave it before spectating another."
                 : "You're already in a game. Leave it before joining or hosting another."
             return
-        }
-        // Web GameRow membershipRequest: Join/Spectate on the game already hosted asks for the
-        // other role over the existing socket (takeSeat / spectate) instead of reconnecting.
-        if let session = game, session.gameId == id, session.spectate != spectate,
-           session.connected, !session.finished {
+        case .switchRole(let toSpectator):
             gamePath.removeAll()
             section = .game
-            if spectate { session.switchToSpectate() } else { session.takeSeat() }
+            if toSpectator { game?.switchToSpectate() } else { game?.takeSeat() }
             return
-        }
-        if let session = game, session.gameId == id, session.spectate == spectate {
+        case .reuse(let reconnect):
             gamePath.removeAll()
             section = .game
-            if !session.connected, !session.finished {
-                Task { await session.start() }
-            }
+            if reconnect, let session = game { Task { await session.start() } }
             return
+        case .replace:
+            break
         }
         // Never `stop()` here: that sends "leave" for the session we're replacing, which would
         // leave a ranked game on the player's behalf. Only the explicit Leave action does that.
@@ -614,5 +606,11 @@ final class AppModel {
         defer { isBusy = false }
         do { try await work() }
         catch { errorMessage = UMFriendlyError.message(for: error) }
+    }
+}
+
+extension GameSession {
+    var entryState: GameEntryState {
+        GameEntryState(gameId: gameId, spectate: spectate, connected: connected, finished: finished, isReview: isReview)
     }
 }

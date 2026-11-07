@@ -1,66 +1,43 @@
 import Foundation
 
-/// Mirrors AppModel.resumeGame / returnToLobby / leave decisions for spectator parity with the
-/// website (hosted Game kept mounted; lobby Spectate on the hosted game sends `spectate`;
-/// Leave sends `leave`, Spectator.leaveGame; back only hides).
-struct Session { var id: String; var spectate: Bool; var connected = true; var finished = false; var review = false }
-enum Outcome: Equatable { case refused, reuse, sendSpectate, sendTakeSeat, newSession(spectate: Bool) }
-
-struct Shell {
-    var inGameId: String?          // redis inGame (players only)
-    var game: Session?
-    var sent: [String] = []
-
-    var seatedGameId: String? { inGameId ?? game?.id }
-    var spectatingGameId: String? {
-        guard let g = game, g.spectate, !g.review, !g.finished, inGameId != g.id else { return nil }
-        return g.id
-    }
-
-    mutating func resume(_ id: String, spectate: Bool) -> Outcome {
-        let blocking = inGameId ?? (game?.spectate == false ? game?.id : nil)
-        if let b = blocking, b != id { return .refused }
-        if let g = game, g.id == id, g.spectate != spectate, g.connected, !g.finished {
-            sent.append(spectate ? "spectate" : "takeSeat"); return spectate ? .sendSpectate : .sendTakeSeat
-        }
-        if let g = game, g.id == id, g.spectate == spectate { return .reuse }
-        game = Session(id: id, spectate: spectate)   // old socket: disconnect only
-        return .newSession(spectate: spectate)
-    }
-    mutating func returnFromBanner() -> Outcome {
-        guard let id = seatedGameId else { return .refused }
-        return resume(id, spectate: game?.id == id ? (game?.spectate ?? false) : false)
-    }
-    mutating func backArrow() { if game?.review == true { game = nil } }   // spectators retained
-    mutating func leave() { if game != nil { sent.append("leave") }; game = nil; inGameId = nil }
-}
-
+/// Compiled together with production Ultimafia/App/GameEntryPolicy.swift (see run line below):
+///   swiftc -parse-as-library Ultimafia/App/GameEntryPolicy.swift Tests/SpectatorLifecycleTests.swift
 @main
 struct SpectatorLifecycleTests {
     static func main() {
-        var s = Shell()
-        precondition(s.resume("g1", spectate: true) == .newSession(spectate: true), "Watch opens spectator")
-        s.backArrow()
-        precondition(s.spectatingGameId == "g1" && s.sent.isEmpty, "back keeps spectator session, sends nothing")
-        precondition(s.returnFromBanner() == .reuse && s.game?.spectate == true, "Return restores spectator view, not a seat")
-        precondition(s.resume("g1", spectate: true) == .reuse, "Watch again on same game reuses socket")
-        precondition(s.resume("g2", spectate: true) == .newSession(spectate: true), "spectator may watch another game")
-        s.leave()
-        precondition(s.sent == ["leave"] && s.game == nil && s.spectatingGameId == nil, "Leave sends leave and drops membership")
+        typealias P = GameEntryPolicy
+        let watching = GameEntryState(gameId: "g1", spectate: true, connected: true, finished: false)
+        let seated = GameEntryState(gameId: "g1", spectate: false, connected: true, finished: false)
 
-        var p = Shell(inGameId: "g1", game: Session(id: "g1", spectate: false))
-        p.backArrow()
-        precondition(p.game != nil && p.spectatingGameId == nil, "player kept, not labeled spectating")
-        precondition(p.resume("g2", spectate: true) == .refused, "seated player can't watch another game")
-        precondition(p.returnFromBanner() == .reuse && p.game?.spectate == false, "player Return stays player")
-        precondition(p.resume("g1", spectate: true) == .sendSpectate, "Watch on own pregame game sends spectate over socket")
+        // Watch from lobby with nothing open -> new spectator session.
+        precondition(P.decide(target: "g1", spectate: true, inGameId: nil, current: nil) == .replace)
+        // Back arrow keeps spectator and player sessions; review closes.
+        precondition(!P.backClosesSession(watching) && !P.backClosesSession(seated))
+        var rev = watching; rev.isReview = true
+        precondition(P.backClosesSession(rev))
+        // Lobby banner target + Return resumes as spectator, reusing the socket.
+        precondition(P.spectatingGameId(inGameId: nil, current: watching) == "g1")
+        precondition(P.returnRole(target: "g1", current: watching) == true)
+        precondition(P.decide(target: "g1", spectate: true, inGameId: nil, current: watching) == .reuse(reconnect: false))
+        // Dropped socket: Return reconnects keeping spectator role (/connect?spectate=true).
+        var dropped = watching; dropped.connected = false
+        precondition(P.decide(target: "g1", spectate: P.returnRole(target: "g1", current: dropped),
+                              inGameId: nil, current: dropped) == .reuse(reconnect: true))
+        // Spectator watching another game: replace (disconnect only), never refused.
+        precondition(P.decide(target: "g2", spectate: true, inGameId: nil, current: watching) == .replace)
+        // Join on the watched game -> takeSeat over socket.
+        precondition(P.decide(target: "g1", spectate: false, inGameId: nil, current: watching) == .switchRole(toSpectator: false))
 
-        var w = Shell(game: Session(id: "g1", spectate: true))
-        precondition(w.resume("g1", spectate: false) == .sendTakeSeat, "Join from lobby while watching sends takeSeat")
-
-        var r = Shell(game: Session(id: "g9", spectate: true, review: true))
-        r.backArrow()
-        precondition(r.game == nil, "review closes on back")
-        print("SpectatorLifecycleTests passed")
+        // Seated player: not labeled spectating, Return stays player, other games refused.
+        precondition(P.spectatingGameId(inGameId: "g1", current: seated) == nil)
+        precondition(P.returnRole(target: "g1", current: seated) == false)
+        precondition(P.decide(target: "g2", spectate: true, inGameId: "g1", current: seated) == .refuse(blockingGameId: "g1"))
+        precondition(P.decide(target: "g1", spectate: true, inGameId: "g1", current: seated) == .switchRole(toSpectator: true))
+        // Seated per server with no session yet (relaunch) still blocks.
+        precondition(P.decide(target: "g2", spectate: true, inGameId: "g1", current: nil) == .refuse(blockingGameId: "g1"))
+        // Finished spectated game: no banner.
+        var done = watching; done.finished = true
+        precondition(P.spectatingGameId(inGameId: nil, current: done) == nil)
+        print("SpectatorLifecycleTests passed (production GameEntryPolicy)")
     }
 }
