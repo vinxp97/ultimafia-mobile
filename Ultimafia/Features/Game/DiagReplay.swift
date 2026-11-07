@@ -73,12 +73,16 @@ struct DiagReplayView: View {
             // scaled to fit the portrait simulator screen (headless simulators can't rotate).
             GeometryReader { g in
                 let s = min(1, g.size.width / l.width)
+                // The scaled window has no real screen edges: give it no safe area so the
+                // layout is proposed exactly w x h.
                 replay
+                    .ignoresSafeArea()
                     .frame(width: l.width, height: l.height)
                     .environment(\.horizontalSizeClass, .regular)
                     .scaleEffect(s, anchor: .topLeading)
                     .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
             }
+            .ignoresSafeArea()
             .background(Color.black.ignoresSafeArea())
         } else if let w = Self.diagWidth {
             HStack(spacing: 0) {
@@ -612,6 +616,11 @@ struct DiagReplayView: View {
                 }
             }
             UMDiag.log("replay", "specchat \(mode)")
+            // `-UMDiagClockTap` here too: the chat jumps to its top 5 s in (top-inset check).
+            if args.contains("-UMDiagClockTap") {
+                try? await Task.sleep(for: .seconds(5))
+                s.chatJumpTopTick &+= 1
+            }
             return
         }
         if let i = args.firstIndex(of: "-UMDiagTopBar"), args.indices.contains(i + 1) {
