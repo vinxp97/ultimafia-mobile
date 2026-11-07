@@ -63,6 +63,19 @@ private struct GameScreen: View {
     /// Height of the floating glass header (compact layouts); the panes reserve it as a top inset
     /// so their content scrolls underneath the glass without anything being stuck behind it.
     @State private var headerHeight: CGFloat = 0
+    /// Duo half-fold: keyboard top (global), panel row height, and hinge state (iOS 27.1+).
+    @State private var keyboardTop: CGFloat?
+    @State private var panelTabsHeight: CGFloat = 0
+    @State private var hingePartiallyOpen: Bool?
+    /// DEBUG fold fixture: simulated safe-area bottom (global); nil on device.
+    @State private var diagContentBottom: CGFloat?
+    private var screenMidY: CGFloat? {
+        #if os(iOS)
+        (UIApplication.shared.connectedScenes.first as? UIWindowScene).map { $0.screen.bounds.midY }
+        #else
+        nil
+        #endif
+    }
     /// The game screen hides the status bar only while it is the screen on show; any other tab,
     /// a pushed profile or the lobby gets it back.
     @State private var isOnScreen = false
@@ -81,11 +94,23 @@ private struct GameScreen: View {
             let wideHeader = UMGameLayout.usesWideHeader(geo.size.width, regular: regular)
             // Compact layouts (iPhone, narrow iPad windows): the header is Liquid Glass floating over
             // the panes, so the chat scrolls underneath it. The wide iPad header stays a solid row.
-            let floating = !wideHeader
+            #if os(iOS)
+            let isPhone = UIDevice.current.userInterfaceIdiom == .phone
+            #else
+            let isPhone = false
+            #endif
+            // Phone held horizontally (Duo): the one-row header floats as Liquid Glass too.
+            let glassWide = UMFoldLayout.usesGlassWideHeader(wideHeader: wideHeader, isPhone: isPhone)
+            let floating = !wideHeader || glassWide
+            let contentBottom = diagContentBottom ?? geo.frame(in: .global).maxY
+            let bandTop = UMFoldLayout.tabBarTopInBand(
+                contentBottom: contentBottom, keyboardTop: keyboardTop, tabHeight: panelTabsHeight,
+                portrait: geo.size.height > geo.size.width, hingePartiallyOpen: hingePartiallyOpen,
+                foldY: screenMidY)
             let topInset = floating ? headerHeight : 0
             // returnToLobby keeps a seated player's connection (the Lobby tab action does the
             // same) and closes spectators and reviews, so the header always has a way out.
-            let header = GameHeader(session: session, wide: wideHeader, onClose: returnToLobby, onLeave: onLeave,
+            let header = GameHeader(session: session, wide: wideHeader, glass: glassWide, onClose: returnToLobby, onLeave: onLeave,
                            // requestLeave: pregame leaves at once (no lock, no overlay); a started game shows LeaveConfirmOverlay.
                            onLeavePrompt: { app.requestLeave() },
                            showsGuides: threeColumns)
@@ -153,10 +178,66 @@ private struct GameScreen: View {
                             }
                     }
                 }
-                GamePanelPicker(session: session, selectedPanel: $selectedPanel, showsPanelTabs: !threeColumns)
+                let picker = GamePanelPicker(session: session, selectedPanel: $selectedPanel, showsPanelTabs: !threeColumns)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                        if h > 0, abs(panelTabsHeight - h) > 0.25 { panelTabsHeight = h }
+                    }
+                if bandTop == nil { picker }
+            }
+            .padding(.bottom, diagContentBottom.map { max(0, geo.frame(in: .global).maxY - $0) } ?? 0)
+            #if DEBUG
+            .overlay(alignment: .topLeading) {
+                // Fold fixture only: shade the simulated keyboard area so the band is visible.
+                if diagContentBottom != nil, let kb = keyboardTop {
+                    Rectangle().fill(Color.gray.opacity(0.35))
+                        .overlay(Text("keyboard (fixture)").font(.caption).foregroundStyle(.white.opacity(0.7)))
+                        .frame(width: geo.size.width, height: max(0, geo.frame(in: .global).maxY - kb))
+                        .offset(y: kb - geo.frame(in: .global).minY)
+                        .allowsHitTesting(false)
+                }
+            }
+            #endif
+            .overlay(alignment: .topLeading) {
+                // Half-folded Duo: the tabs sit in the empty band directly above the keyboard.
+                if let bandTop {
+                    GamePanelPicker(session: session, selectedPanel: $selectedPanel, showsPanelTabs: !threeColumns)
+                        .frame(width: geo.size.width)
+                        .offset(y: bandTop - geo.frame(in: .global).minY)
+                        .accessibilityIdentifier("foldBandPanelTabs")
+                }
             }
         }
         .background(UMTheme.bg.ignoresSafeArea())
+        #if os(iOS)
+        // The fold fixture owns the hinge state (the simulator reports a flat hinge).
+        .background { HingeObserver(partiallyOpen: Binding(
+            get: { hingePartiallyOpen },
+            set: { if diagContentBottom == nil { hingePartiallyOpen = $0 } })) }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            let screenH = (note.object as? UIScreen)?.bounds.height ?? end.maxY
+            keyboardTop = (end.height > 0 && end.minY < screenH) ? end.minY : nil
+            UMDiag.log("fold", "kb top \(end.minY) h \(end.height) hinge \(String(describing: hingePartiallyOpen))")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardTop = nil
+        }
+        #endif
+        #if DEBUG && os(iOS)
+        // `-UMDiagFoldBand <keyboardTopPt>` (with -UMDiagReplay): simulator stand-in for a half-folded
+        // Duo with the keyboard on the lower panel (no hinge or DS keyboard in the simulator).
+        .onAppear {
+            let args = ProcessInfo.processInfo.arguments
+            // `-UMDiagFoldBand <safeAreaBottomPt> <keyboardTopPt>`: the app's content stops at the first
+            // value (as the hinge safe area does on device) and the keyboard starts at the second.
+            if let i = args.firstIndex(of: "-UMDiagFoldBand"), args.indices.contains(i + 2),
+               let bottom = Double(args[i + 1]), let kb = Double(args[i + 2]) {
+                hingePartiallyOpen = true
+                diagContentBottom = CGFloat(bottom)
+                keyboardTop = CGFloat(kb)
+            }
+        }
+        #endif
         .background { gameShortcuts }
         #if os(iOS)
         // iPhone / iPad: the game is full-bleed unless Status Bar is set to Show; the clock and
@@ -317,6 +398,8 @@ private struct GameHeader: View {
     var session: GameSession
     /// iPad: setup name, roles strip, paged phases and timer in one row.
     var wide = false
+    /// Phone held horizontally: the one-row header as floating Liquid Glass pieces.
+    var glass = false
     var onClose: (() -> Void)? = nil
     var onLeave: (() -> Void)? = nil
     /// Long press on the back arrow: Leave confirmation (5 s lock while participation is required).
@@ -333,7 +416,7 @@ private struct GameHeader: View {
     @AppStorage("um.showSetupGuides") private var showSetupGuides = true
 
     var body: some View {
-        if wide { wideBody } else { compactBody }
+        if wide && glass { glassWideBody } else if wide { wideBody } else { compactBody }
     }
 
     /// Clock tap: the current phase's chat to its first message (what the old up-arrow did).
@@ -430,6 +513,45 @@ private struct GameHeader: View {
     }
 
     /// iPad one-row header (regular width, 820 pt+): unchanged apart from the glass back circle.
+    /// Duo horizontal: same one-row content as the wide header, but separate glass pieces floating
+    /// over the chat (back circle, title, roles, phases, spectators, timer) instead of a solid bar.
+    private var glassWideBody: some View {
+        GlassEffectContainer(spacing: 2) {
+            HStack(alignment: .center, spacing: 8) {
+                backButton
+                Text(session.setupName ?? session.gameType ?? "Game")
+                    .font(.headline)
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: 220, minHeight: 44, alignment: .leading)
+                    .glassEffect(.regular, in: .capsule)
+                    .fixedSize(horizontal: true, vertical: false)
+                statusBadges
+                if session.isLiarsDice {
+                    Spacer(minLength: 8)
+                } else {
+                    SetupRoleStrip(session: session, inHeader: true)
+                        .padding(.horizontal, 6)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+                        .glassEffect(.regular, in: .capsule)
+                        .layoutPriority(-1)
+                    PagedPhaseBar(session: session)
+                        .fixedSize()
+                        .padding(.horizontal, 6)
+                        .frame(minHeight: 44)
+                        .glassEffect(.regular, in: .capsule)
+                }
+                SpectatorCountChip(session: session, glass: true)
+                PhaseTimerBadge(session: session, glass: true, onTap: scrollChatToTop)
+                if showsGuides, showSetupGuides, session.setupId != nil {
+                    SetupGuidesButton(session: session, fillsWidth: false)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+    }
+
     private var wideBody: some View {
         HStack(alignment: .center, spacing: 8) {
             backButton
@@ -2929,3 +3051,26 @@ private struct ReplyingToBar: View {
         .accessibilityIdentifier("replyingToBar")
     }
 }
+
+#if os(iOS)
+/// UIHingeInteraction (iOS 27.1+): reports whether the hinge is partially open. Nil where the
+/// device or OS has no hinge updates, so the fold layout falls back to geometry alone.
+private struct HingeObserver: UIViewRepresentable {
+    @Binding var partiallyOpen: Bool?
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        if #available(iOS 27.1, *) {
+            let binding = $partiallyOpen
+            view.addInteraction(UIHingeInteraction { _, update in
+                let value: Bool? = update.hinge.map { $0.status == .partiallyOpen }
+                if binding.wrappedValue != value { binding.wrappedValue = value }
+            })
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+#endif

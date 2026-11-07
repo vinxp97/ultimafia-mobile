@@ -68,7 +68,19 @@ struct DiagReplayView: View {
         .task { await run() }
         // `-UMDiagWidth <pt> [compact|regular]`: approximate a Split View / Slide Over window for
         // screenshots (simctl can't resize the simulator's scene).
-        if let w = Self.diagWidth {
+        if let l = Self.diagLandscape {
+            // `-UMDiagLandscape <w> <h>`: lay the game out in a landscape-shaped w x h window,
+            // scaled to fit the portrait simulator screen (headless simulators can't rotate).
+            GeometryReader { g in
+                let s = min(1, g.size.width / l.width)
+                replay
+                    .frame(width: l.width, height: l.height)
+                    .environment(\.horizontalSizeClass, .regular)
+                    .scaleEffect(s, anchor: .topLeading)
+                    .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
+            }
+            .background(Color.black.ignoresSafeArea())
+        } else if let w = Self.diagWidth {
             HStack(spacing: 0) {
                 replay
                     .frame(width: w.width)
@@ -78,6 +90,13 @@ struct DiagReplayView: View {
         } else {
             replay
         }
+    }
+
+    private static var diagLandscape: CGSize? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-UMDiagLandscape"), args.indices.contains(i + 2),
+              let w = Double(args[i + 1]), let h = Double(args[i + 2]) else { return nil }
+        return CGSize(width: w, height: h)
     }
 
     private static var diagWidth: (width: CGFloat, compact: Bool)? {
