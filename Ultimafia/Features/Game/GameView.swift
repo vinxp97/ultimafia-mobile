@@ -79,9 +79,12 @@ private struct GameScreen: View {
     @State private var diagContentBottom: CGFloat?
     /// DEBUG `-UMDiagHingeHalfOpen`: hinge reported partially open (simulator has no hinge).
     @State private var diagHingeForced = false
-    private var screenPortrait: Bool? {
+    /// DEBUG `-UMDiagInnerScreen`: treat the simulator's screen as the Duo inner portrait screen
+    /// (only the screen-size gate; the composer is focused and the real keyboard opens).
+    @State private var diagInnerScreen = false
+    private var screenSize: CGSize? {
         #if os(iOS)
-        (UIApplication.shared.connectedScenes.first as? UIWindowScene).map { $0.screen.bounds.height > $0.screen.bounds.width }
+        (UIApplication.shared.connectedScenes.first as? UIWindowScene).map { $0.screen.bounds.size }
         #else
         nil
         #endif
@@ -122,11 +125,11 @@ private struct GameScreen: View {
             let floating = !wideHeader || glassWide
             let contentBottom = diagContentBottom ?? geo.frame(in: .global).maxY
             let tabsOnKeyboard = UMFoldLayout.tabsOnKeyboard(
-                hingePartiallyOpen: hingePartiallyOpen, screenPortrait: screenPortrait ?? (geo.size.height > geo.size.width),
-                threeColumns: threeColumns) && diagContentBottom == nil
+                screenSize: diagInnerScreen ? CGSize(width: 669, height: 951) : (screenSize ?? geo.size),
+                isPhone: isPhone, threeColumns: threeColumns) && diagContentBottom == nil
             let bandTop = tabsOnKeyboard ? nil : UMFoldLayout.tabBarTopInBand(
                 contentBottom: contentBottom, keyboardTop: keyboardTop, tabHeight: panelTabsHeight,
-                portrait: screenPortrait ?? (geo.size.height > geo.size.width), hingePartiallyOpen: hingePartiallyOpen,
+                portrait: screenSize.map { $0.height > $0.width } ?? (geo.size.height > geo.size.width), hingePartiallyOpen: hingePartiallyOpen,
                 foldY: screenMidY)
             let tabsHiddenForKeyboard = tabsOnKeyboard && keyboardTop != nil
             let keyboardTabs: AnyView? = tabsOnKeyboard
@@ -267,6 +270,13 @@ private struct GameScreen: View {
             }
             // `-UMDiagHingeHalfOpen`: only the hinge status is simulated; the real software
             // keyboard opens (composer focused 3 s in) and positions are the system's own.
+            if args.contains("-UMDiagInnerScreen") {
+                diagInnerScreen = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(3))
+                    chatFocused.wrappedValue = true
+                }
+            }
             if args.contains("-UMDiagHingeHalfOpen") {
                 diagHingeForced = true
                 hingePartiallyOpen = true

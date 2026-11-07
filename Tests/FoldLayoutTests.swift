@@ -29,13 +29,15 @@ struct FoldLayoutTests {
         // (475.5) and the app stops at it, so no app-window band exists: this returned nil on
         // device (build 4049bb4) and the tabs never moved.
         precondition(P.tabBarTopInBand(contentBottom: 455.5, keyboardTop: 455.5, tabHeight: 47.7, portrait: true, hingePartiallyOpen: true, foldY: 475.5) == nil)
-        // Production path for that posture: the tabs ride on the keyboard (accessory).
-        precondition(P.tabsOnKeyboard(hingePartiallyOpen: true, screenPortrait: true, threeColumns: false))
-        // Flat/closed, unknown, landscape screen, or the iPad three-column layout: never.
-        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: false, screenPortrait: true, threeColumns: false))
-        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: nil, screenPortrait: true, threeColumns: false))
-        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: true, screenPortrait: false, threeColumns: false))
-        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: true, screenPortrait: true, threeColumns: true))
+        // Production gate (device log Nov 6 21:26 ET, f58cc0d): inner screen 669x951, split keyboard
+        // (top 455.5, h 495.5) with hinge status 3 (fully open, angle 3.1 rad) — the old hinge gate
+        // was false there, so the accessory was removed. The screen is the gate now.
+        precondition(P.tabsOnKeyboard(screenSize: CGSize(width: 669, height: 951), isPhone: true, threeColumns: false))
+        // Outer screen (466x678), landscape inner, iPad/Mac, three columns: never.
+        precondition(!P.tabsOnKeyboard(screenSize: CGSize(width: 466, height: 678), isPhone: true, threeColumns: false))
+        precondition(!P.tabsOnKeyboard(screenSize: CGSize(width: 951, height: 669), isPhone: true, threeColumns: false))
+        precondition(!P.tabsOnKeyboard(screenSize: CGSize(width: 834, height: 1194), isPhone: false, threeColumns: false))
+        precondition(!P.tabsOnKeyboard(screenSize: CGSize(width: 669, height: 951), isPhone: true, threeColumns: true))
         // Glass wide header only for phones in wide header mode.
         precondition(P.usesGlassWideHeader(wideHeader: true, isPhone: true))
         precondition(!P.usesGlassWideHeader(wideHeader: true, isPhone: false))
