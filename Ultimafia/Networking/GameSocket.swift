@@ -30,6 +30,10 @@ final class GameSocket: NSObject, URLSessionWebSocketDelegate {
         }
         session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
         task = session?.webSocketTask(with: request)
+        // URLSessionWebSocketTask rejects any single frame over 1 MiB by default
+        // ("Message too long"). A long pregame chat makes the join `history`
+        // event exceed that, which dropped the socket and bounced to the lobby.
+        task?.maximumMessageSize = UMConfig.socketMaxMessageBytes
         UMDiag.log("socket", "connect port \(port)")
         listen()
         task?.resume()

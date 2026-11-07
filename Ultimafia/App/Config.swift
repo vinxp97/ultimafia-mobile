@@ -31,6 +31,9 @@ nonisolated enum UMConfig {
     static let lobbies = ["Main", "Sandbox", "Competitive", "Games", "Survivor", "Roleplay"]
     static let maxChatLength = 240
     static let pingInterval: TimeInterval = 10
+    /// Largest single socket frame accepted. Join `history` carries the whole
+    /// pregame/game chat and can exceed URLSession's 1 MiB default.
+    static let socketMaxMessageBytes = 64 * 1024 * 1024
 }
 
 nonisolated enum UMBackend: String, CaseIterable, Identifiable {
