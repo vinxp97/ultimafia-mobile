@@ -24,6 +24,18 @@ struct FoldLayoutTests {
         precondition(P.tabBarTopInBand(contentBottom: 400, keyboardTop: 400, tabHeight: 50, portrait: true, hingePartiallyOpen: nil, foldY: 512) == nil)
         // Keyboard below fold (ordinary keyboard on a flat-ish phone): unchanged.
         precondition(P.tabBarTopInBand(contentBottom: 600, keyboardTop: 600, tabHeight: 50, portrait: true, hingePartiallyOpen: true, foldY: 512) == nil)
+        // Device log, iPhone Duo half open (Nov 6 20:18 ET): screen 951 pt tall, keyboard frame
+        // top 455.5 / h 495.5, hinge partiallyOpen. The keyboard frame starts above the fold
+        // (475.5) and the app stops at it, so no app-window band exists: this returned nil on
+        // device (build 4049bb4) and the tabs never moved.
+        precondition(P.tabBarTopInBand(contentBottom: 455.5, keyboardTop: 455.5, tabHeight: 47.7, portrait: true, hingePartiallyOpen: true, foldY: 475.5) == nil)
+        // Production path for that posture: the tabs ride on the keyboard (accessory).
+        precondition(P.tabsOnKeyboard(hingePartiallyOpen: true, screenPortrait: true, threeColumns: false))
+        // Flat/closed, unknown, landscape screen, or the iPad three-column layout: never.
+        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: false, screenPortrait: true, threeColumns: false))
+        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: nil, screenPortrait: true, threeColumns: false))
+        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: true, screenPortrait: false, threeColumns: false))
+        precondition(!P.tabsOnKeyboard(hingePartiallyOpen: true, screenPortrait: true, threeColumns: true))
         // Glass wide header only for phones in wide header mode.
         precondition(P.usesGlassWideHeader(wideHeader: true, isPhone: true))
         precondition(!P.usesGlassWideHeader(wideHeader: true, isPhone: false))

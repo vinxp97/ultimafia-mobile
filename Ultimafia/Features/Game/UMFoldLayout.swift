@@ -27,6 +27,14 @@ enum UMFoldLayout {
         return fold - margin - tabHeight
     }
 
+    /// Half-folded Duo (hinge reported partially open) in portrait: the system gives the keyboard
+    /// the lower panel and keeps the app's window above it, so app views can't be drawn there. The
+    /// tabs go on the keyboard itself, as the composer's keyboard accessory. `screenPortrait` is the
+    /// screen's shape: the app's own window can be landscape-shaped once shrunk to the upper panel.
+    static func tabsOnKeyboard(hingePartiallyOpen: Bool?, screenPortrait: Bool, threeColumns: Bool) -> Bool {
+        hingePartiallyOpen == true && screenPortrait && !threeColumns
+    }
+
     /// Phone in a wide (one-row header) window: glass header floating over the panes.
     static func usesGlassWideHeader(wideHeader: Bool, isPhone: Bool) -> Bool { wideHeader && isPhone }
 }

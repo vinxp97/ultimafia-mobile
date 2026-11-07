@@ -1,4 +1,12 @@
 import SwiftUI
+
+extension EnvironmentValues {
+    /// Content to show as the composer's keyboard accessory (UIKit `inputAccessoryView`), drawn by
+    /// the system as part of the keyboard. Used on a half-folded iPhone Duo, where the keyboard owns
+    /// the lower panel: the accessory is the only supported way to put controls there.
+    @Entry var umComposerKeyboardAccessory: AnyView? = nil
+}
+
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -69,6 +77,16 @@ private struct GameScreen: View {
     @State private var hingePartiallyOpen: Bool?
     /// DEBUG fold fixture: simulated safe-area bottom (global); nil on device.
     @State private var diagContentBottom: CGFloat?
+    /// DEBUG `-UMDiagHingeHalfOpen`: hinge reported partially open (simulator has no hinge).
+    @State private var diagHingeForced = false
+    private var screenPortrait: Bool? {
+        #if os(iOS)
+        (UIApplication.shared.connectedScenes.first as? UIWindowScene).map { $0.screen.bounds.height > $0.screen.bounds.width }
+        #else
+        nil
+        #endif
+    }
+
     private var screenMidY: CGFloat? {
         #if os(iOS)
         (UIApplication.shared.connectedScenes.first as? UIWindowScene).map { $0.screen.bounds.midY }
@@ -103,10 +121,17 @@ private struct GameScreen: View {
             let glassWide = UMFoldLayout.usesGlassWideHeader(wideHeader: wideHeader, isPhone: isPhone)
             let floating = !wideHeader || glassWide
             let contentBottom = diagContentBottom ?? geo.frame(in: .global).maxY
-            let bandTop = UMFoldLayout.tabBarTopInBand(
+            let tabsOnKeyboard = UMFoldLayout.tabsOnKeyboard(
+                hingePartiallyOpen: hingePartiallyOpen, screenPortrait: screenPortrait ?? (geo.size.height > geo.size.width),
+                threeColumns: threeColumns) && diagContentBottom == nil
+            let bandTop = tabsOnKeyboard ? nil : UMFoldLayout.tabBarTopInBand(
                 contentBottom: contentBottom, keyboardTop: keyboardTop, tabHeight: panelTabsHeight,
-                portrait: geo.size.height > geo.size.width, hingePartiallyOpen: hingePartiallyOpen,
+                portrait: screenPortrait ?? (geo.size.height > geo.size.width), hingePartiallyOpen: hingePartiallyOpen,
                 foldY: screenMidY)
+            let tabsHiddenForKeyboard = tabsOnKeyboard && keyboardTop != nil
+            let keyboardTabs: AnyView? = tabsOnKeyboard
+                ? AnyView(GamePanelPicker(session: session, selectedPanel: $selectedPanel, showsPanelTabs: true))
+                : nil
             let topInset = floating ? headerHeight : 0
             // returnToLobby keeps a seated player's connection (the Lobby tab action does the
             // same) and closes spectators and reviews, so the header always has a way out.
@@ -160,6 +185,7 @@ private struct GameScreen: View {
                                 topInset: topInset,
                                 clipsAboveComposer: bandTop != nil
                             )
+                            .environment(\.umComposerKeyboardAccessory, keyboardTabs)
                             .opacity(selectedPanel == 0 ? 1 : 0)
                             .allowsHitTesting(selectedPanel == 0)
                             .accessibilityHidden(selectedPanel != 0)
@@ -183,7 +209,7 @@ private struct GameScreen: View {
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                         if h > 0, abs(panelTabsHeight - h) > 0.25 { panelTabsHeight = h }
                     }
-                if bandTop == nil { picker }
+                if bandTop == nil, !tabsHiddenForKeyboard { picker }
             }
             .padding(.bottom, diagContentBottom.map { max(0, geo.frame(in: .global).maxY - $0) } ?? 0)
             #if DEBUG
@@ -213,12 +239,14 @@ private struct GameScreen: View {
         // The fold fixture owns the hinge state (the simulator reports a flat hinge).
         .background { HingeObserver(partiallyOpen: Binding(
             get: { hingePartiallyOpen },
-            set: { if diagContentBottom == nil { hingePartiallyOpen = $0 } })) }
+            set: { if diagContentBottom == nil, !diagHingeForced { hingePartiallyOpen = $0 } })) }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             guard let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
             let screenH = (note.object as? UIScreen)?.bounds.height ?? end.maxY
             keyboardTop = (end.height > 0 && end.minY < screenH) ? end.minY : nil
-            UMDiag.log("fold", "kb top \(end.minY) h \(end.height) hinge \(String(describing: hingePartiallyOpen))")
+            let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+            let win = scene?.windows.first(where: \.isKeyWindow)
+            UMDiag.log("fold", "kb top \(end.minY) h \(end.height) hinge \(String(describing: hingePartiallyOpen)) screen \(scene?.screen.bounds ?? .zero) window \(win?.frame ?? .zero) safe \(win?.safeAreaInsets ?? .zero) tabsH \(panelTabsHeight)")
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             keyboardTop = nil
@@ -236,6 +264,16 @@ private struct GameScreen: View {
                 hingePartiallyOpen = true
                 diagContentBottom = CGFloat(bottom)
                 keyboardTop = CGFloat(kb)
+            }
+            // `-UMDiagHingeHalfOpen`: only the hinge status is simulated; the real software
+            // keyboard opens (composer focused 3 s in) and positions are the system's own.
+            if args.contains("-UMDiagHingeHalfOpen") {
+                diagHingeForced = true
+                hingePartiallyOpen = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(3))
+                    chatFocused.wrappedValue = true
+                }
             }
         }
         #endif
@@ -3080,6 +3118,7 @@ private struct HingeObserver: UIViewRepresentable {
             let binding = $partiallyOpen
             view.addInteraction(UIHingeInteraction { _, update in
                 let value: Bool? = update.hinge.map { $0.status == .partiallyOpen }
+                UMDiag.log("fold", "hinge status \(update.hinge.map { String($0.status.rawValue) } ?? "none") angle \(update.hinge.map { String(format: "%.1f", $0.angle) } ?? "-") window \(view.window?.frame ?? .zero)")
                 if binding.wrappedValue != value { binding.wrappedValue = value }
             })
         }

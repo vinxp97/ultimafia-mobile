@@ -87,6 +87,7 @@ struct UMComposerField: UIViewRepresentable {
         context.coordinator.placeholderLabel?.text = placeholder
         context.coordinator.placeholderLabel?.textColor = enabled ? .placeholderText : textColor
         context.coordinator.placeholderLabel?.isHidden = !text.isEmpty
+        context.coordinator.applyAccessory(context.environment.umComposerKeyboardAccessory, to: tv)
         if isFocused, !tv.isFirstResponder, enabled, tv.window != nil {
             DispatchQueue.main.async { tv.becomeFirstResponder() }
         } else if !isFocused, tv.isFirstResponder {
@@ -162,6 +163,32 @@ struct UMComposerField: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: UMComposerField
         weak var placeholderLabel: UILabel?
+        private var accessoryHost: UIHostingController<AnyView>?
+
+        /// Attach, update or remove the keyboard accessory; the keyboard redraws only on a change.
+        func applyAccessory(_ content: AnyView?, to tv: UITextView) {
+            if let content {
+                if let host = accessoryHost {
+                    host.rootView = content
+                    return
+                }
+                let host = UIHostingController(rootView: content)
+                host.view.backgroundColor = .clear
+                host.sizingOptions = [.intrinsicContentSize]
+                host.view.autoresizingMask = [.flexibleWidth]
+                let h = host.view.systemLayoutSizeFitting(CGSize(width: tv.window?.bounds.width ?? 400, height: 0)).height
+                host.view.frame = CGRect(x: 0, y: 0, width: tv.window?.bounds.width ?? 400, height: max(44, h))
+                accessoryHost = host
+                tv.inputAccessoryView = host.view
+                if tv.isFirstResponder { tv.reloadInputViews() }
+                UMDiag.log("fold", "keyboard accessory attached h \(host.view.frame.height)")
+            } else if accessoryHost != nil {
+                accessoryHost = nil
+                tv.inputAccessoryView = nil
+                if tv.isFirstResponder { tv.reloadInputViews() }
+                UMDiag.log("fold", "keyboard accessory removed")
+            }
+        }
         init(_ parent: UMComposerField) { self.parent = parent }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
