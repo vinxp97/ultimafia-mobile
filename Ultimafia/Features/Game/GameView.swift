@@ -81,13 +81,14 @@ private struct GameScreen: View {
             #endif
             let threeColumns = UMGameLayout.usesThreeColumns(geo.size, regular: regular)
             let wideHeader = UMGameLayout.usesWideHeader(geo.size.width, regular: regular)
-            // Compact layouts (iPhone, narrow iPad windows): the header is Liquid Glass floating over
-            // the panes, so the chat scrolls underneath it. The wide iPad header stays a solid row.
-            let floating = !wideHeader
+            // Compact (closed iPhone / narrow windows) already floats as Liquid Glass. Wide layouts
+            // (Duo inner screen, iPad) use the same floating glass pieces instead of the solid grey bar.
+            let glassWide = UMGameLayout.usesGlassWideHeader(wideHeader)
+            let floating = !wideHeader || glassWide
             let topInset = floating ? headerHeight : 0
             // returnToLobby keeps a seated player's connection (the Lobby tab action does the
             // same) and closes spectators and reviews, so the header always has a way out.
-            let header = GameHeader(session: session, wide: wideHeader, onClose: returnToLobby, onLeave: onLeave,
+            let header = GameHeader(session: session, wide: wideHeader, glass: glassWide, onClose: returnToLobby, onLeave: onLeave,
                            // requestLeave: pregame leaves at once (no lock, no overlay); a started game shows LeaveConfirmOverlay.
                            onLeavePrompt: { app.requestLeave() },
                            showsGuides: threeColumns)
@@ -100,14 +101,18 @@ private struct GameScreen: View {
                     if threeColumns {
                         // iPad landscape: Village 25% | Chat 50% | Act 25%, each scrolling on its own.
                         // selectedPanel is kept untouched so rotating back restores the same tab.
+                        // Floating glass wide header: reserve the same top inset the compact panes use.
                         HStack(spacing: 0) {
                             GameTownPane(session: session, compact: true)
+                                .safeAreaPadding(.top, topInset)
                                 .frame(width: UMGameLayout.sideColumnWidth(geo.size.width))
                             Divider().overlay(UMTheme.line)
-                            GameChatPane(session: session, draft: $draft, chatFocused: chatFocused, showsPhaseBar: false)
+                            GameChatPane(session: session, draft: $draft, chatFocused: chatFocused,
+                                         showsPhaseBar: false, topInset: topInset)
                                 .frame(maxWidth: .infinity)
                             Divider().overlay(UMTheme.line)
                             GameActPane(session: session)
+                                .safeAreaPadding(.top, topInset)
                                 .frame(width: UMGameLayout.sideColumnWidth(geo.size.width))
                         }
                     } else {
@@ -312,13 +317,19 @@ enum UMGameLayout {
     static func usesWideHeader(_ width: CGFloat, regular: Bool) -> Bool {
         regular && width >= 820
     }
+
+    /// Wide one-row header as floating Liquid Glass (Duo inner screen, iPad). Compact layouts
+    /// already use glass via compactBody; this only gates the wide path.
+    static func usesGlassWideHeader(_ wideHeader: Bool) -> Bool { wideHeader }
 }
 
 private struct GameHeader: View {
     @Environment(AppModel.self) private var app
     var session: GameSession
-    /// iPad: setup name, roles strip, paged phases and timer in one row.
+    /// iPad / Duo inner: setup name, roles strip, paged phases and timer in one row.
     var wide = false
+    /// Wide layouts: floating Liquid Glass pieces instead of the solid grey bar.
+    var glass = false
     var onClose: (() -> Void)? = nil
     var onLeave: (() -> Void)? = nil
     /// Long press on the back arrow: Leave confirmation (5 s lock while participation is required).
@@ -335,7 +346,7 @@ private struct GameHeader: View {
     @AppStorage("um.showSetupGuides") private var showSetupGuides = true
 
     var body: some View {
-        if wide { wideBody } else { compactBody }
+        if wide && glass { glassWideBody } else if wide { wideBody } else { compactBody }
     }
 
     /// Clock tap: the current phase's chat to its first message (what the old up-arrow did).
@@ -435,7 +446,52 @@ private struct GameHeader: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// iPad one-row header (regular width, 820 pt+): unchanged apart from the glass back circle.
+    /// Duo inner / iPad one-row header as separate Liquid Glass pieces floating over the chat
+    /// (back, title, roles, phases or Ghost panel, spectators, timer). Respects Ghost / Liar's
+    /// Dice / single-state phase-strip hiding from the solid wideBody.
+    private var glassWideBody: some View {
+        GlassEffectContainer(spacing: 2) {
+            HStack(alignment: .center, spacing: 8) {
+                backButton
+                Text(session.setupName ?? session.gameType ?? "Game")
+                    .font(.headline)
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: 220, minHeight: 44, alignment: .leading)
+                    .glassEffect(.regular, in: .capsule)
+                    .fixedSize(horizontal: true, vertical: false)
+                statusBadges
+                if session.isLiarsDice {
+                    Spacer(minLength: 8)
+                } else {
+                    SetupRoleStrip(session: session, inHeader: true)
+                        .padding(.horizontal, 6)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+                        .glassEffect(.regular, in: .capsule)
+                        .layoutPriority(-1)
+                    if session.isGhostGame, session.ghostHasContent {
+                        GhostHeaderPanel(session: session, glass: true, singleLine: true)
+                            .frame(maxWidth: 420)
+                    } else if !session.isSingleStateView {
+                        PagedPhaseBar(session: session)
+                            .fixedSize()
+                            .padding(.horizontal, 6)
+                            .frame(minHeight: 44)
+                            .glassEffect(.regular, in: .capsule)
+                    }
+                }
+                SpectatorCountChip(session: session, glass: true)
+                PhaseTimerBadge(session: session, glass: true, onTap: scrollChatToTop)
+                if showsGuides, showSetupGuides, session.setupId != nil {
+                    SetupGuidesButton(session: session, fillsWidth: false)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+    }
+
+    /// iPad one-row header (regular width, 820 pt+): solid row kept as a non-glass fallback.
     private var wideBody: some View {
         HStack(alignment: .center, spacing: 8) {
             backButton
