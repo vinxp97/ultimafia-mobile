@@ -18,6 +18,11 @@ struct GameView: View {
         if let i = args.firstIndex(of: "-UMDiagVotes"), args.indices.contains(i + 1), args[i + 1].hasPrefix("act") { return 2 }
         if let i = args.firstIndex(of: "-UMDiagGhost"), args.indices.contains(i + 2), args[i + 2] == "act" { return 2 }
         if args.contains("-UMDiagShoot") { return 2 }
+        if let i = args.firstIndex(of: "-UMDiagKudos") {
+            let rest = args[(i + 1)...]
+            if rest.contains("act") { return 2 }
+            if rest.contains("village") { return 1 }
+        }
         #endif
         return 0
     }
@@ -955,8 +960,17 @@ private struct GameChatPane: View {
             // Outside the transcript scroll hierarchy, but floating above its content rather
             // than reserving a separate opaque strip. Only the composer's own controls draw a glass
             // background, so nothing else gains an opaque strip.
-            if session.showComposer || session.canSwitchToSpectate || session.canTakeSeat {
+            if session.showComposer || session.canSwitchToSpectate || session.canTakeSeat || session.hasKudosVoteUI {
                 VStack(spacing: 8) {
+                    // Web: kudos dock sits between the transcript and the chat input.
+                    if session.hasKudosVoteUI {
+                        KudosDock(
+                            session: session,
+                            compact: paneWidth < 600,
+                            maxHeight: min(320, max(160, paneWidth * 0.7)),
+                            widthHint: max(0, paneWidth - 16)
+                        )
+                    }
                     // Web PregameSeatActions: above the chat box on phones.
                     if session.canSwitchToSpectate { PregameSpectateBar(session: session) }
                     if session.canTakeSeat { PregameJoinSeatBar(session: session) }
@@ -976,7 +990,7 @@ private struct GameChatPane: View {
                     }
             }
         }
-        .onChange(of: session.showComposer || session.canSwitchToSpectate) { _, show in
+        .onChange(of: session.showComposer || session.canSwitchToSpectate || session.canTakeSeat || session.hasKudosVoteUI) { _, show in
             if !show { composerOverlayHeight = 0 }
         }
     }
@@ -2067,6 +2081,12 @@ private struct GameTownPane: View {
                 .accessibilityLabel(on ? "Isolated: \(player.name)" : "Isolate \(player.name)")
             }
             UMAvatarView(player: player, size: dim(36, 22, 44))
+                .overlay(alignment: .bottomTrailing) {
+                    if session.playerReceivedKudos(player.id) {
+                        KudosBadge(size: dim(18, 13, 18))
+                            .offset(x: 4, y: 4)
+                    }
+                }
             VStack(alignment: .leading, spacing: dim(2, 0, 2)) {
                 // Graveyard keeps custom name colors (dead-red is for chat lines only).
                 PlayerNameView(player: player, fontSize: dim(16, 13, 17))
@@ -2177,6 +2197,7 @@ private struct GameActPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                KudosAwardedPanel(session: session)
                 if session.isLiarsDice {
                     LiarsDiceBoard(session: session)
                 }

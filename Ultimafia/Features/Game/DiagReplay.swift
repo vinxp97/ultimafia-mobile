@@ -90,8 +90,20 @@ struct DiagReplayView: View {
 
     @MainActor
     private func run() async {
+        let args = ProcessInfo.processInfo.arguments
+        // `-UMDiagKudos [open|partial|awarded|finalized|spectator|test] [act|village]`:
+        // post-game kudos screenshots. Seated unless the mode is spectator. Offline: no network.
+        let kudosMode: String? = {
+            guard let i = args.firstIndex(of: "-UMDiagKudos") else { return nil }
+            let next = args.indices.contains(i + 1) ? args[i + 1] : "partial"
+            if next.hasPrefix("-") { return "partial" }
+            // Panel-only follow-ons (`act`, `village`) are not a mode.
+            if next == "act" || next == "village" { return "partial" }
+            return next
+        }()
         // `-UMDiagShoot` plays a seat (offline: never connects) so its actions are votable.
-        let s = GameSession(gameId: "diag-replay", spectate: !ProcessInfo.processInfo.arguments.contains("-UMDiagShoot"))
+        let seated = args.contains("-UMDiagShoot") || (kudosMode != nil && kudosMode != "spectator")
+        let s = GameSession(gameId: "diag-replay", spectate: !seated)
         app.game = s
         UMDiag.log("replay", "start")
         var players: [String: Any] = [:]
@@ -104,10 +116,13 @@ struct DiagReplayView: View {
             ["id": "m\(phase)-\(n)", "senderId": "p\(n % 12)", "content": "message \(n) in phase \(phase) about the cop and mafia vig claims",
              "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"]
         }
+        if let mode = kudosMode {
+            await Self.runKudosFixture(session: s, mode: mode)
+            return
+        }
         // `-UMDiagTopBar pregame|middle|latest|overflow|many|many-earliest|many-middle|many-latest|many-post`:
         // static header screenshots (with -UMDiagReplay). many*: six play phases + Postgame so the
         // wide strip's max-3 window can be checked at earliest / middle / latest / postgame.
-        let args = ProcessInfo.processInfo.arguments
         // `-UMDiagJoinOrder [livefirst|historyfirst|liveafter|duphistory]`: lobby join chronology.
         // Server seatPlayer sends the live "X has joined" alert before `history`. The chat UI reads
         // phases[i].messages; without re-sorting that list after history, the join sticks at the top.
@@ -640,7 +655,7 @@ struct DiagReplayView: View {
             let pending = s.chatLineTapped(prior, at: Date())
             expect(pending == .pendingReply, "tap queues pending reply")
             // Advance past double-tap window so the reply bar commits.
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(250))
             expect(s.replyTarget?.id == prior.id, "reply target set")
             expect(s.viewingPhaseId == day1 && !s.followLive, "reply keeps Day 1")
             expect(s.phaseScrollAnchors[day1] == anchorBefore, "reply leaves scroll anchor")
@@ -661,7 +676,7 @@ struct DiagReplayView: View {
 
             // Re-queue reply and send it.
             _ = s.chatLineTapped(prior, at: Date())
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(250))
             sent.removeAll()
             expect(s.speak("quoting day one from here"), "reply speak allowed")
             expect(s.viewingPhaseId == day1, "reply send stays on Day 1")
@@ -721,7 +736,7 @@ struct DiagReplayView: View {
             s.viewPhase(day1)
             expect(s.followLive == false && s.viewingPhaseId == day1, "explicit Day 1 after live day advance")
             _ = s.chatLineTapped(prior, at: Date())
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(250))
             expect(s.replyTarget?.id == prior.id && s.viewingPhaseId == day1, "screenshot: reply on Day 1")
 
             // Live path still follows when viewing live.
@@ -734,7 +749,7 @@ struct DiagReplayView: View {
             // Back to Day 1 with reply for the capture.
             s.viewPhase(day1)
             _ = s.chatLineTapped(prior, at: Date())
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(250))
             GameMusic.stop()
             UMDiag.log("replay", "historical-reply ready (Day 1 + replying bar)")
             return
@@ -996,6 +1011,159 @@ struct DiagReplayView: View {
                                     "time": Date().timeIntervalSince1970 * 1000, "meetingId": "village"])
         }
         UMDiag.log("replay", "done")
+    }
+
+    /// Offline post-game kudos: several alignment rows, locked votes, awards, finalized, spectator.
+    /// Never talks to prod; votes the fixture echoes stay on this session.
+    @MainActor
+    private static func runKudosFixture(session s: GameSession, mode: String) async {
+        s.debugQuiet = true
+        let names = [
+            "Vinman", "Alice", "Bob", "Carol", "Dave",
+            "Eve", "Frank", "Grace", "Hank", "Ivy", "Jack",
+        ]
+        let userIds = (0..<names.count).map { "u\($0)" }
+        var seats: [String: Any] = [:]
+        for (i, name) in names.enumerated() {
+            seats["p\(i)"] = [
+                "id": "p\(i)", "name": name, "avatar": false,
+                "userId": userIds[i], "playerListPosition": i,
+            ]
+        }
+        s.debugFeed("self", "p0")
+        s.debugFeed("options", ["ranked": true, "competitive": false, "spectating": true])
+        s.debugFeed("setup", [
+            "id": "diag-kudos", "name": "Ranked Mafia", "gameType": "Mafia", "total": names.count,
+            "roles": [["Villager:": 4, "Cop:": 1, "Doctor:": 1, "Gunsmith:": 1,
+                       "Mafioso:": 2, "Cultist:": 2, "Serial Killer:": 1]],
+        ])
+        s.debugFeed("players", seats)
+        // Carol died; Jack left but can still receive kudos (#3072).
+        s.debugFeed("death", "p3")
+        s.debugFeed("playerLeave", "p10")
+        let roles: [(String, String)] = [
+            ("p0", "Villager"), ("p1", "Cop"), ("p2", "Doctor"), ("p3", "Villager"),
+            ("p4", "Gunsmith"), ("p5", "Mafioso"), ("p6", "Mafioso"),
+            ("p7", "Cultist"), ("p8", "Cultist"), ("p9", "Serial Killer"), ("p10", "Villager"),
+        ]
+        for (id, role) in roles {
+            s.debugFeed("roleReveal", ["playerId": id, "role": role])
+        }
+        s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 3])
+        s.debugFeed("state", ["id": -2, "name": "Postgame", "dayCount": 3])
+        s.debugFeed("meeting", [
+            "id": "postgame", "name": "Postgame", "speech": true, "voting": false,
+            "amMember": true, "canTalk": mode != "spectator",
+        ])
+        s.debugFeed("timerInfo", ["name": "postgame", "delay": 120_000])
+        s.debugFeed("time", ["name": "postgame", "time": 30_000])
+        s.debugFeed("winners", [
+            "groups": ["Village"],
+            "messages": ["Town has won."],
+            "playersByGroup": ["Village": ["p0", "p1", "p2", "p3", "p4", "p10"]],
+        ])
+
+        let village = ["p0", "p1", "p2", "p3", "p4", "p10"]
+        let rows: [[String: Any]] = [
+            ["key": "Village", "label": "Town", "candidates": village],
+            ["key": "Mafia", "label": "Mafia", "candidates": ["p5", "p6"]],
+            ["key": "Cult", "label": "Cult", "candidates": ["p7", "p8"]],
+            ["key": "Independent", "label": "Independent", "candidates": ["p9"]],
+        ]
+        func payload(votes: [String: String], awarded: [String: [String]],
+                     canVote: Bool, finalized: Bool, testMode: Bool) -> [String: Any] {
+            [
+                "rows": rows,
+                "myVotes": votes,
+                "awarded": awarded,
+                "canVote": canVote,
+                "finalized": finalized,
+                "testMode": testMode,
+            ]
+        }
+
+        let t0 = Date().timeIntervalSince1970 * 1000
+        func alert(_ id: String, _ text: String, tags: [String] = []) -> [String: Any] {
+            var m: [String: Any] = [
+                "id": id, "senderId": "server", "content": text, "time": t0,
+                "meetingId": "postgame",
+            ]
+            if !tags.isEmpty { m["tags"] = tags }
+            return m
+        }
+        s.debugFeed("message", alert("kgameover", "The game is over."))
+        s.debugFeed("message", alert("kwins", "Town has won.", tags: ["info"]))
+        s.debugFeed("message", [
+            "id": "kchat1", "senderId": "p1", "content": "gg, well played everyone",
+            "time": t0 + 1_000, "meetingId": "postgame",
+        ])
+
+        let awardedEarly: [String: [String]] = [
+            "Village": [], "Mafia": [], "Cult": ["p7"], "Independent": [],
+        ]
+        let awardedFinal: [String: [String]] = [
+            "Village": ["p1"], "Mafia": [], "Cult": ["p7"], "Independent": ["p9"],
+        ]
+
+        switch mode {
+        case "open":
+            s.debugFeed("kudos", payload(votes: [:], awarded: [:], canVote: true, finalized: false, testMode: false))
+        case "test":
+            s.debugFeed("kudos", payload(votes: [:], awarded: [:], canVote: true, finalized: false, testMode: true))
+        case "awarded":
+            s.debugFeed("message", alert("kgrace", "Grace has received kudos!", tags: ["info"]))
+            s.debugFeed("kudos", payload(votes: [:], awarded: awardedEarly, canVote: true, finalized: false, testMode: false))
+        case "finalized":
+            s.debugFeed("message", alert("kgrace", "Grace has received kudos!", tags: ["info"]))
+            s.debugFeed("message", alert("kalice", "Alice has received kudos!", tags: ["info"]))
+            s.debugFeed("message", alert("kivy", "Ivy has received kudos!", tags: ["info"]))
+            s.debugFeed("message", alert("kcoins", "You earned 3 coins for kudos voting!"))
+            s.debugFeed("kudos", payload(
+                votes: ["Village": "p1", "Mafia": "*", "Cult": "p7", "Independent": "p9"],
+                awarded: awardedFinal, canVote: false, finalized: true, testMode: false
+            ))
+            s.debugFeed("finished", nil)
+        case "spectator":
+            s.debugFeed("isSpectator", true)
+            s.debugFeed("message", alert("kgrace", "Grace has received kudos!", tags: ["info"]))
+            s.debugFeed("message", alert("kalice", "Alice has received kudos!", tags: ["info"]))
+            s.debugFeed("kudos", payload(
+                votes: [:], awarded: awardedFinal, canVote: false, finalized: false, testMode: false
+            ))
+        default:
+            // `partial`: Cult already awarded; Mafia already voted (`*` — compact
+            // summary on a phone, or stays expanded on a wide shared line with
+            // Cult / Independent). Village locks to Alice after a beat, confirms,
+            // then collapses to "TOWN ✓ Alice". Independent stays open.
+            // Self (Vinman) is in the Town row and cannot be picked.
+            s.debugFeed("message", alert("kgrace", "Grace has received kudos!", tags: ["info"]))
+            s.debugFeed("kudos", payload(
+                votes: ["Mafia": "*"],
+                awarded: awardedEarly,
+                canVote: true, finalized: false, testMode: false
+            ))
+            // Echo fixture votes back as a `kudos` state, the way the server would.
+            s.debugSendHook = { event, body in
+                guard event == "kudosVote",
+                      let row = body["row"] as? String,
+                      let target = body["target"] as? String else { return }
+                var votes = s.kudos?.myVotes ?? [:]
+                votes[row] = target
+                let awarded = s.kudos?.awarded ?? awardedEarly
+                s.debugFeed("kudos", payload(
+                    votes: votes, awarded: awarded,
+                    canVote: true, finalized: false, testMode: s.kudos?.testMode ?? false
+                ))
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            var votes = s.kudos?.myVotes ?? ["Mafia": "*"]
+            votes["Village"] = "p1"
+            s.debugFeed("kudos", payload(
+                votes: votes, awarded: awardedEarly,
+                canVote: true, finalized: false, testMode: false
+            ))
+        }
+        UMDiag.log("replay", "kudos \(mode)")
     }
 }
 #endif

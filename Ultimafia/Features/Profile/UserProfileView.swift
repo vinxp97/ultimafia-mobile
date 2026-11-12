@@ -336,7 +336,7 @@ struct UserProfileView: View {
 
     private var metaTiles: some View {
         HStack(spacing: 10) {
-            tile("Kudos", number("kudos"))
+            tile("Kudos", number("kudos"), icon: "Kudos", hint: "Earned from outstanding performance in ranked and competitive games.")
             tile("Karma", number("karma"))
             if showsGamesTile {
                 tile("Games", mafiaGamesTotal)
@@ -348,10 +348,19 @@ struct UserProfileView: View {
         blob["stats"] != nil
     }
 
-    private func tile(_ title: String, _ value: Int) -> some View {
+    private func tile(_ title: String, _ value: Int, icon: String? = nil, hint: String? = nil) -> some View {
         VStack(spacing: 4) {
-            Text("\(value)")
-                .font(.headline.monospacedDigit())
+            HStack(spacing: 4) {
+                if let icon {
+                    Image(icon)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                        .accessibilityHidden(true)
+                }
+                Text("\(value)")
+                    .font(.headline.monospacedDigit())
+            }
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(UMTheme.muted)
@@ -359,6 +368,9 @@ struct UserProfileView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)
         .background(UMTheme.elevated, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title), \(value)")
+        .accessibilityHint(hint ?? "")
     }
 
     @ViewBuilder

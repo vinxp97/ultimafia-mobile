@@ -217,7 +217,17 @@ final class GameSession {
     /// Read-only replay of a finished game from `/game/:id/review/data`: no socket, no sounds.
     let isReview: Bool
     /// Sound/notification side effects are muted while replaying history or reviewing.
-    private var isQuiet: Bool { ingestingHistory || isReview }
+    private var isQuiet: Bool {
+        if ingestingHistory || isReview { return true }
+        #if DEBUG
+        if debugQuiet { return true }
+        #endif
+        return false
+    }
+    #if DEBUG
+    /// DiagReplay fixtures: mute bells and win music (simulator audio).
+    var debugQuiet = false
+    #endif
 
     var connected = false
     var loaded = false
@@ -233,6 +243,10 @@ final class GameSession {
     var finished = false {
         didSet { if finished { isolating = false; isolatedIds = [] } }
     }
+    /// Live post-game kudos state from the `kudos` socket event. Nil until a payload arrives.
+    var kudos: KudosState?
+    /// Review / history only: user ids from `kudosReceivers` (not player ids).
+    var reviewKudosUserIds: Set<String> = []
     /// Village "Isolate messages": checked players stay prominent, everyone else's chat dims.
     /// In memory per session; cleared when the game ends (and dropped with the session on leave).
     var isolating = false
@@ -904,6 +918,12 @@ final class GameSession {
             } else if let hist = obj["history"] {
                 handle("history", hist)
             }
+            // Review has no voting dock. Badges use stored user ids (not player ids).
+            var receivers = stringList(obj["kudosReceivers"])
+            if let one = obj["kudosReceiver"] as? String, !one.isEmpty, !receivers.contains(one) {
+                receivers.insert(one, at: 0)
+            }
+            reviewKudosUserIds = Set(receivers)
             finished = true
             stateName = "Review"
             loaded = true
@@ -1066,6 +1086,43 @@ final class GameSession {
             debugSendHook?("vote", ["meetingId": meetingId, "selection": selection])
             #endif
         }
+    }
+
+    /// Give a kudos vote. Emits `kudosVote` with the row key (`"Village"`, never `"Town"`)
+    /// and a player id or `"*"`. Trusts `KudosPolicy` first; the server still decides and
+    /// answers with a `kudos` state (and a chat alert on rejection). No undo, no optimistic lock.
+    func sendKudosVote(row: String, target: String) {
+        guard !isReview, let kudos else { return }
+        if KudosPolicy.rejection(state: kudos, selfId: selfId, row: row, target: target) != nil { return }
+        let payload = KudosPolicy.votePayload(row: row, target: target)
+        socket.send("kudosVote", object: payload)
+        #if DEBUG
+        debugSendHook?("kudosVote", ["row": row, "target": target])
+        #endif
+    }
+
+    /// Voting dock belongs in the chat column: a voter, voting still open, at least one row.
+    /// The view further hides it once every row has faded out, and never in review.
+    var hasKudosVoteUI: Bool {
+        guard !isReview, let kudos, kudos.canVote, !kudos.finalized, !kudos.rows.isEmpty else { return false }
+        return true
+    }
+
+    /// Live awards (player ids) or, in review, players whose user id is in `kudosReceivers`.
+    func playerReceivedKudos(_ playerId: String) -> Bool {
+        if let kudos, KudosPolicy.isAwarded(kudos, playerId: playerId) { return true }
+        if let uid = player(for: playerId)?.userId, !uid.isEmpty, reviewKudosUserIds.contains(uid) { return true }
+        return false
+    }
+
+    /// Role string shown on a kudos tile (revealed / known / own).
+    func kudosRole(for playerId: String) -> String? {
+        if playerId == selfId, let name = selfRoleName, !name.isEmpty {
+            if selfRoleModifiers.isEmpty { return name }
+            return "\(name):\(selfRoleModifiers.joined(separator: "/"))"
+        }
+        if let known = knownRoles[playerId], !known.isEmpty { return known }
+        return nil
     }
 
     /// Whether a double tap would actually quote this line. The haptic fires on the same answer, so
@@ -1602,7 +1659,12 @@ final class GameSession {
             break
         case "vote", "unvote":
             applyVote(data, unvote: event == "unvote")
+        case "kudos":
+            applyKudos(data)
         case "finished":
+            // Do not close the socket here. Server `endPostgame` broadcasts `finished` first,
+            // then (synchronously, before any await) the final `kudos` (`finalized: true`) and
+            // the coin `message`s. Dropping the socket on this event would miss both.
             finished = true
             stateName = "Finished"
         case "left":
@@ -2390,6 +2452,16 @@ final class GameSession {
             quotable: false,
             fromState: currentPhaseId
         ))
+    }
+
+    private func applyKudos(_ data: Any?) {
+        // Web ignores `kudos` in review and in tutorials. The iOS client has no tutorial
+        // game mode; review never attaches a live socket, and we also refuse it here.
+        guard !isReview else { return }
+        guard let state = KudosState.parse(data) else { return }
+        // Only start the UI after a payload that has rows. Later updates replace the state.
+        if kudos == nil && state.rows.isEmpty { return }
+        kudos = state
     }
 
     private func stringValue(_ data: Any?) -> String? {
