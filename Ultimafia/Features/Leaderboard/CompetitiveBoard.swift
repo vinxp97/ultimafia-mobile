@@ -10,6 +10,8 @@ struct CompetitiveBoard: View {
     let service: UMLeaderboardService
     var initialSeason: Int?
     var expandFirstPast = false
+    /// DEBUG screenshots: open the standings on the Season toggle.
+    var startOnSeason = false
     var onOpenProfile: ((String, String) -> Void)?
     var onLoaded: () -> Void = {}
     @Environment(\.horizontalSizeClass) private var hSize
@@ -20,7 +22,7 @@ struct CompetitiveBoard: View {
     @State private var seasonBase: [UMSeasonStanding] = []
     @State private var allSeasonTop: [Int: [UMSeasonStanding]] = [:]
     @State private var expanded: Set<UMRoundRef> = []
-    @State private var sortByFortune = false
+    @State private var scope: StandingsScope = .round
     @State private var showAllStandings = false
     @State private var loading = false
     @State private var error: String?
@@ -38,9 +40,7 @@ struct CompetitiveBoard: View {
     /// haven't been accounted yet (their standings come from roundInfo).
     private var seasonRows: [UMSeasonStanding] {
         let pending = started.filter { !$0.accounted }.compactMap { rounds[$0.ref]?.standings }
-        let rows = pending.isEmpty ? seasonBase : UMCompetitive.provisionalSeason(base: seasonBase, pending: pending)
-        guard sortByFortune else { return rows }
-        return rows.sorted { ($0.tiebreakerFortune, $0.prestige) > ($1.tiebreakerFortune, $1.prestige) }
+        return pending.isEmpty ? seasonBase : UMCompetitive.provisionalSeason(base: seasonBase, pending: pending)
     }
 
     var body: some View {
@@ -48,21 +48,22 @@ struct CompetitiveBoard: View {
             if let error { Text(error).font(.footnote).foregroundStyle(UMTheme.deadName) }
             seasonPicker
             if season != nil {
-                if wide {
+                // Two columns only when there are earlier rounds to fill the right one.
+                if wide && !pastRefs.isEmpty {
                     HStack(alignment: .top, spacing: 14) {
-                        VStack(alignment: .leading, spacing: 14) { heroSection }
-                            .frame(maxWidth: .infinity)
                         VStack(alignment: .leading, spacing: 14) {
-                            pastSection
-                            seasonSection
+                            heroSection
+                            standingsSection
                         }
-                        .frame(width: 380)
+                        .frame(maxWidth: .infinity)
+                        VStack(alignment: .leading, spacing: 14) { pastSection }
+                            .frame(width: 360)
                     }
                     allSeasonsSection
                 } else {
                     heroSection
+                    standingsSection
                     pastSection
-                    seasonSection
                     allSeasonsSection
                 }
             } else if loading || seasons.isEmpty {
@@ -89,6 +90,7 @@ struct CompetitiveBoard: View {
         guard let season else { return }
         showAllStandings = false
         expanded = []
+        scope = startOnSeason ? .season : .round
         do {
             seasonBase = try await service.seasonStandings(season.number)
             allSeasonTop[season.number] = seasonBase
@@ -108,11 +110,6 @@ struct CompetitiveBoard: View {
         for s in seasons where allSeasonTop[s.number] == nil {
             if let rows = try? await service.seasonStandings(s.number) { allSeasonTop[s.number] = rows }
         }
-    }
-
-    private func name(_ id: String) -> String {
-        for d in rounds.values { if let p = d.standings.first(where: { $0.player.id == id }) { return p.player.name } }
-        return seasonBase.first { $0.player.id == id }?.player.name ?? "Player"
     }
 
     // MARK: Season picker
@@ -173,10 +170,6 @@ struct CompetitiveBoard: View {
             RoundStatusCard(detail: hero)
             if hero.standings.isEmpty {
                 expiredCard(round: hero.round.ref.number)
-            } else {
-                topFortuneChart(hero)
-                standingsCard(hero)
-                scoreCard(hero)
             }
         } else if heroRef != nil {
             ProgressView().tint(UMTheme.blood).frame(maxWidth: .infinity).padding(.vertical, 30)
@@ -200,77 +193,9 @@ struct CompetitiveBoard: View {
                 Image(systemName: "clock.badge.xmark").font(.title3).foregroundStyle(UMTheme.muted)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Round \(round) games expired").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                    Text("Games are deleted after 30 days, so this round's scores can't be rebuilt. Season order is shown below instead.")
+                    Text("Games are deleted after 30 days, so this round's scores can't be rebuilt. Switch the standings to Season for where everyone finished.")
                         .font(.caption).foregroundStyle(UMTheme.muted)
                 }
-            }
-        }
-    }
-
-    private struct ChartSeg: Identifiable {
-        var id: String
-        var player: String
-        var points: Int
-        var shade: Int
-    }
-
-    private func topFortuneChart(_ d: UMRoundDetail) -> some View {
-        let top = Array(d.standings.prefix(wide ? 12 : 8))
-        var segs: [ChartSeg] = []
-        for s in top {
-            let label = "\(s.ranking + 1). \(s.player.name)"
-            let parts = (d.games ?? []).reversed().compactMap { $0.earned[s.player.id] }.filter { $0 > 0 }
-            if parts.isEmpty || parts.reduce(0, +) != s.fortune {
-                segs.append(ChartSeg(id: s.id, player: label, points: s.fortune, shade: 0))
-            } else {
-                for (i, p) in parts.enumerated() {
-                    segs.append(ChartSeg(id: "\(s.id)-\(i)", player: label, points: p, shade: i % 2))
-                }
-            }
-        }
-        return UMLeaderboardCard(title: "Top fortune · score by game") {
-            Chart(segs) { seg in
-                BarMark(x: .value("Fortune", seg.points), y: .value("Player", seg.player), height: .ratio(0.7))
-                    .foregroundStyle(seg.shade == 0 ? UMLeaderboardStyle.fortune : Color(red: 0.86, green: 0.58, blue: 0.18))
-                    .cornerRadius(2)
-            }
-            .chartYAxis { AxisMarks { _ in AxisValueLabel().foregroundStyle(.white) } }
-            .chartXAxis { AxisMarks { _ in AxisGridLine().foregroundStyle(UMTheme.line); AxisValueLabel() } }
-            .frame(height: CGFloat(top.count) * 26 + 24)
-            Text("Each segment is one winning game. Losers earn 0.")
-                .font(.caption2).foregroundStyle(UMTheme.muted)
-        }
-    }
-
-    private func standingsCard(_ d: UMRoundDetail) -> some View {
-        let projected = !d.round.accounted
-        let limit = showAllStandings ? d.standings.count : (wide ? 20 : 12)
-        return UMLeaderboardCard(title: "Round \(d.round.ref.number) standings · \(d.standings.count) players") {
-            HStack(spacing: 10) {
-                Text("#").frame(width: 32)
-                Text("Player").frame(maxWidth: .infinity, alignment: .leading)
-                if wide { Text("Games").frame(width: 46, alignment: .trailing) }
-                Text("Fortune").frame(width: 62, alignment: .trailing)
-                Text(projected ? "Prestige*" : "Prestige").frame(width: 64, alignment: .trailing)
-            }
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(UMTheme.muted)
-            LazyVStack(spacing: 0) {
-                ForEach(d.standings.prefix(limit)) { s in
-                    standingRow(s)
-                    Divider().overlay(UMTheme.line)
-                }
-            }
-            if d.standings.count > limit || showAllStandings {
-                Button(showAllStandings ? "Show fewer" : "Show all \(d.standings.count)") {
-                    withAnimation { showAllStandings.toggle() }
-                }
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-            }
-            if projected {
-                Text("* Projected. Prestige is paid when the round is accounted after review; until then these results can still change.")
-                    .font(.caption2).foregroundStyle(UMTheme.muted)
             }
         }
     }
@@ -308,40 +233,6 @@ struct CompetitiveBoard: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(UMCompetitive.ordinal(s.ranking + 1)), \(s.player.name), \(s.fortune) fortune, \(s.gamesPlayed) games, \(s.prestige) prestige")
-    }
-
-    private func scoreCard(_ d: UMRoundDetail) -> some View {
-        let games = d.games ?? []
-        let shown = wide ? 12 : 6
-        return UMLeaderboardCard(title: "Score by game · \(games.count) games") {
-            ForEach(games.prefix(shown)) { g in
-                let winners = g.earned.filter { $0.value > 0 }.sorted { $0.value > $1.value }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text(g.setupName).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                        Spacer(minLength: 0)
-                        if let me = service.meId, let pts = g.earned[me] {
-                            Text(pts > 0 ? "You +\(pts)" : "You 0")
-                                .font(.caption.weight(.bold).monospacedDigit())
-                                .foregroundStyle(pts > 0 ? UMLeaderboardStyle.you : UMTheme.muted)
-                        }
-                    }
-                    Text("Day \(g.day) · \(g.endTime.formatted(date: .abbreviated, time: .shortened)) · \(g.earned.count) players")
-                        .font(.caption2).foregroundStyle(UMTheme.muted).lineLimit(1)
-                    Text(winners.isEmpty ? "No fortune paid" :
-                            winners.prefix(4).map { "\(name($0.key)) +\($0.value)" }.joined(separator: ", ")
-                            + (winners.count > 4 ? " +\(winners.count - 4) more" : ""))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(UMLeaderboardStyle.fortune)
-                        .lineLimit(2)
-                }
-                .padding(.vertical, 4)
-                Divider().overlay(UMTheme.line)
-            }
-            if games.count > shown {
-                Text("+ \(games.count - shown) more games").font(.caption2).foregroundStyle(UMTheme.muted)
-            }
-        }
     }
 
     // MARK: Previous rounds
@@ -383,7 +274,7 @@ struct CompetitiveBoard: View {
                 if d.standings.isEmpty {
                     HStack(spacing: 6) {
                         Image(systemName: "clock.badge.xmark")
-                        Text("Games expired. Season order below shows where everyone finished.")
+                        Text("Games expired. Season standings show where everyone finished.")
                     }
                     .font(.caption).foregroundStyle(UMTheme.muted)
                 } else {
@@ -449,61 +340,149 @@ struct CompetitiveBoard: View {
         }
     }
 
-    // MARK: Season standings
+    // MARK: Standings (Round / Season)
+
+    enum StandingsScope: Hashable { case round, season }
 
     @ViewBuilder
-    private var seasonSection: some View {
-        sectionTitle("Season \(seasonNo ?? 0) standings").id("season")
-        let rows = seasonRows
-        UMLeaderboardCard(title: provisional ? "Provisional · includes projected prestige" : "Final") {
-            Picker("Sort", selection: $sortByFortune) {
-                Text("Prestige").tag(false)
-                Text("Top fortune").tag(true)
+    private var standingsSection: some View {
+        let n = seasonNo ?? 0
+        let roundNo = heroRef?.number ?? 0
+        sectionTitle("Standings").id("standings")
+        UMLeaderboardCard(title: standingsSubtitle) {
+            Picker("Standings", selection: $scope) {
+                Text("Round \(roundNo)").tag(StandingsScope.round)
+                Text("Season \(n)").tag(StandingsScope.season)
             }
             .pickerStyle(.segmented)
-            if rows.isEmpty {
-                Text("No prestige has been paid this season yet.").font(.footnote).foregroundStyle(UMTheme.muted)
-            } else {
-                let top = Array(rows.prefix(8))
-                Chart(top) { r in
-                    BarMark(x: .value(sortByFortune ? "Fortune" : "Prestige", sortByFortune ? r.tiebreakerFortune : r.prestige),
-                            y: .value("Player", r.player.name), height: .ratio(0.7))
-                        .foregroundStyle(sortByFortune ? UMLeaderboardStyle.fortune : UMLeaderboardStyle.prestige)
-                        .cornerRadius(2)
+            .onChange(of: scope) { _, _ in showAllStandings = false }
+            switch scope {
+            case .round: roundStandings
+            case .season: seasonStandings
+            }
+        }
+    }
+
+    private var standingsSubtitle: String {
+        switch scope {
+        case .round:
+            guard let hero else { return "Round" }
+            let state = (hero.round.phase == .grace || hero.round.phase == .review) ? "Awaiting results · \(hero.round.phase.label)"
+                : hero.round.phase.label
+            return "Round \(hero.round.ref.number) · \(hero.standings.count) players · \(state)"
+        case .season:
+            return provisional ? "Season \(seasonNo ?? 0) · Provisional · includes projected prestige" : "Season \(seasonNo ?? 0) · Final"
+        }
+    }
+
+    private func barChart(_ bars: [(String, Int)], label: String, color: Color) -> some View {
+        Chart(Array(bars.enumerated()), id: \.offset) { _, bar in
+            BarMark(x: .value(label, bar.1), y: .value("Player", bar.0), height: .ratio(0.7))
+                .foregroundStyle(color)
+                .cornerRadius(2)
+        }
+        .chartYAxis { AxisMarks { _ in AxisValueLabel().foregroundStyle(.white) } }
+        .chartXAxis { AxisMarks { _ in AxisGridLine().foregroundStyle(UMTheme.line); AxisValueLabel() } }
+        .frame(height: CGFloat(bars.count) * 24 + 24)
+        .animation(.snappy, value: scope)
+    }
+
+    @ViewBuilder
+    private var roundStandings: some View {
+        if let hero, !hero.standings.isEmpty {
+            let projected = !hero.round.accounted
+            let rows = hero.standings
+            let limit = showAllStandings ? rows.count : (wide ? 20 : 12)
+            barChart(rows.prefix(8).map { ("\($0.ranking + 1). \($0.player.name)", $0.fortune) },
+                     label: "Fortune", color: UMLeaderboardStyle.fortune)
+            HStack(spacing: 10) {
+                Text("#").frame(width: 32)
+                Text("Player").frame(maxWidth: .infinity, alignment: .leading)
+                if wide { Text("Games").frame(width: 46, alignment: .trailing) }
+                Text("Fortune").frame(width: 62, alignment: .trailing)
+                Text(projected ? "Prestige*" : "Prestige").frame(width: 64, alignment: .trailing)
+            }
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(UMTheme.muted)
+            LazyVStack(spacing: 0) {
+                ForEach(rows.prefix(limit)) { s in
+                    standingRow(s)
+                    Divider().overlay(UMTheme.line)
                 }
-                .chartYAxis { AxisMarks { _ in AxisValueLabel().foregroundStyle(.white) } }
-                .chartXAxis { AxisMarks { _ in AxisGridLine().foregroundStyle(UMTheme.line); AxisValueLabel() } }
-                .frame(height: CGFloat(top.count) * 24 + 24)
-                .animation(.snappy, value: sortByFortune)
-                HStack(spacing: 10) {
-                    Text("#").frame(width: 32)
-                    Text("Player").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Fortune").frame(width: 66, alignment: .trailing)
-                    Text(provisional ? "Prestige*" : "Prestige").frame(width: 64, alignment: .trailing)
-                }
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(UMTheme.muted)
-                ForEach(Array(rows.prefix(15).enumerated()), id: \.element.id) { i, r in
-                    HStack(spacing: 10) {
-                        UMRankBadge(ranking: i + 1).frame(width: 32)
-                        HStack(spacing: 5) {
-                            Text(r.player.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                            if r.player.id == service.meId { UMYouTag() }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        Text(r.tiebreakerFortune.formatted()).frame(width: 66, alignment: .trailing)
-                            .foregroundStyle(UMLeaderboardStyle.fortune)
-                        Text("\(r.prestige)").frame(width: 64, alignment: .trailing)
-                            .foregroundStyle(UMLeaderboardStyle.prestige).fontWeight(.bold)
-                    }
-                    .font(.subheadline.monospacedDigit())
-                    .padding(.vertical, 3)
-                }
-                Text(provisional
-                     ? "* Includes prestige the unaccounted round would pay at today's ranking. Final when it's accounted."
-                     : "Ranked by prestige; fortune breaks ties. Top 3 earn season trophies.")
+            }
+            showAllButton(total: rows.count, limit: limit)
+            if projected {
+                Text("* Projected. Prestige is paid when the round is accounted after review; until then these results can still change.")
                     .font(.caption2).foregroundStyle(UMTheme.muted)
             }
+        } else if hero != nil {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.badge.xmark")
+                Text("This round's games expired, so its table can't be rebuilt. Season shows where everyone finished.")
+            }
+            .font(.caption).foregroundStyle(UMTheme.muted)
+        } else {
+            ProgressView().tint(UMTheme.blood).frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var seasonStandings: some View {
+        let rows = seasonRows
+        if rows.isEmpty {
+            Text("No prestige has been paid this season yet.").font(.footnote).foregroundStyle(UMTheme.muted)
+        } else {
+            let limit = showAllStandings ? rows.count : (wide ? 20 : 12)
+            barChart(rows.prefix(8).map { ("\($0.ranking + 1). \($0.player.name)", $0.prestige) },
+                     label: "Prestige", color: UMLeaderboardStyle.prestige)
+            HStack(spacing: 10) {
+                Text("#").frame(width: 32)
+                Text("Player").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Fortune").frame(width: 66, alignment: .trailing)
+                Text(provisional ? "Prestige*" : "Prestige").frame(width: 64, alignment: .trailing)
+            }
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(UMTheme.muted)
+            LazyVStack(spacing: 0) {
+                ForEach(rows.prefix(limit)) { r in
+                    Button { onOpenProfile?(r.player.profileKey, r.player.name) } label: {
+                        HStack(spacing: 10) {
+                            UMRankBadge(ranking: r.ranking + 1).frame(width: 32)
+                            UMAvatarView(userId: r.player.id, hasAvatar: r.player.avatar, name: r.player.name, size: 26)
+                            HStack(spacing: 5) {
+                                Text(r.player.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                if r.player.id == service.meId { UMYouTag() }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(r.tiebreakerFortune.formatted()).frame(width: 66, alignment: .trailing)
+                                .foregroundStyle(UMLeaderboardStyle.fortune)
+                            Text("\(r.prestige)").frame(width: 64, alignment: .trailing)
+                                .foregroundStyle(UMLeaderboardStyle.prestige).fontWeight(.bold)
+                        }
+                        .font(.subheadline.monospacedDigit())
+                        .padding(.vertical, 7)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Divider().overlay(UMTheme.line)
+                }
+            }
+            showAllButton(total: rows.count, limit: limit)
+            Text(provisional
+                 ? "* Includes prestige the unaccounted round would pay at today's ranking. Final when it's accounted."
+                 : "Ranked by prestige; fortune breaks ties. Top 3 earn season trophies.")
+                .font(.caption2).foregroundStyle(UMTheme.muted)
+        }
+    }
+
+    @ViewBuilder
+    private func showAllButton(total: Int, limit: Int) -> some View {
+        if total > limit || showAllStandings {
+            Button(showAllStandings ? "Show fewer" : "Show all \(total)") {
+                withAnimation { showAllStandings.toggle() }
+            }
+            .font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity)
         }
     }
 

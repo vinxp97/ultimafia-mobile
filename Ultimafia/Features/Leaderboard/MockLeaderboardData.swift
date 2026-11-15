@@ -217,23 +217,6 @@ final class MockLeaderboardData {
             UMSeasonStanding(player: p, ranking: i, prestige: prestige[p.id] ?? 0, tiebreakerFortune: fortune[p.id] ?? 0)
         }
     }
-
-    func history(playerId: String, season: Int) -> [UMPlayerRoundPoint] {
-        guard let s = seasons.first(where: { $0.number == season }) else { return [] }
-        return s.rounds.filter(\.hasStarted).map { r in
-            let d = details[r.ref]
-            let row = fullStandings[r.ref]?.first { $0.player.id == playerId }
-            let score = d?.games.map { $0.reduce(0) { $0 + ($1.earned[playerId] ?? 0) } }
-            let games = d?.games.map { $0.filter { $0.earned[playerId] != nil }.count }
-            return UMPlayerRoundPoint(round: r.ref.number, fortune: row?.fortune ?? 0, ranking: row?.ranking,
-                                      prestige: row?.prestige ?? 0, score: score, games: games)
-        }
-    }
-
-    func competitors(season: Int) -> [UMCompetitor] {
-        let ids = Set(details.filter { $0.key.season == season }.flatMap { $0.value.standings.map(\.player.id) })
-        return players.filter { ids.contains($0.id) }
-    }
 }
 
 /// Small seeded generator so the mock is identical on every launch.

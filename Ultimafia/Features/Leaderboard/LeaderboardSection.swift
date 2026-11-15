@@ -26,7 +26,7 @@ struct LeaderboardSectionView: View {
 #if DEBUG
 /// `-UMDiagLeaderboard <mode>`: the Leaderboard section inside the real tab bar.
 /// Sample data (offline): `skill`, `competitive` (hero round), `competitive-past` (previous
-/// rounds, first expanded), `competitive-season` (season standings), `competitive-expired`
+/// rounds, first expanded), `competitive-standings` (Round standings), `competitive-season` (Season standings), `competitive-expired`
 /// (an older season whose games are gone). Prefix `live-` (e.g. `live-competitive`) to read the
 /// real public endpoints instead.
 struct UMDiagLeaderboardView: View {
@@ -45,6 +45,7 @@ struct UMDiagLeaderboardView: View {
         switch base {
         case "competitive-past": "past"
         case "competitive-season": "season"
+        case "competitive-standings": "standings"
         case "competitive-seasons": "seasons"
         default: nil
         }

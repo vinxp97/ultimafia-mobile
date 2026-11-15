@@ -85,9 +85,10 @@ struct LeaderboardView: View {
                 case .skill: SkillBoard(service: service, onOpenProfile: onOpenProfile)
                 case .competitive:
                     CompetitiveBoard(service: service, initialSeason: initialSeason, expandFirstPast: anchor == "past",
+                                     startOnSeason: anchor == "season",
                                      onOpenProfile: onOpenProfile) {
                         guard let anchor else { return }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { proxy.scrollTo(anchor, anchor: .top) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { proxy.scrollTo(anchor == "season" ? "standings" : anchor, anchor: .top) }
                     }
                 }
             }

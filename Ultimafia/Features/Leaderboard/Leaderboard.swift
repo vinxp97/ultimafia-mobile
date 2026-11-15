@@ -449,17 +449,3 @@ enum UMCompetitiveParse {
         }
     }
 }
-
-/// One player's history across a season's rounds, for the chart.
-struct UMPlayerRoundPoint: Identifiable, Hashable, Sendable {
-    var round: Int
-    /// Final fortune that round. The server keeps no per-round snapshot; see MockLeaderboardData.
-    var fortune: Int
-    /// 0-based finish, or nil if they didn't play.
-    var ranking: Int?
-    var prestige: Int
-    /// Sum of per-game scores, only while the round's games still exist.
-    var score: Int?
-    var games: Int?
-    var id: Int { round }
-}
