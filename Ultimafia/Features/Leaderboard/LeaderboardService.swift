@@ -1,30 +1,25 @@
 import Foundation
 
-/// Where the Leaderboard page gets its data. The page only talks to this protocol, so the mock
-/// competitive data can be swapped for the real endpoints without touching the views.
+/// Where the Leaderboard page gets its data. The page only talks to this protocol.
 protocol UMLeaderboardService: AnyObject {
     /// True when the Skill board is sample data rather than the live Hall of Fame.
     var skillIsMock: Bool { get }
-    /// True when the Competitive board is sample data. (Always, for the mock-up.)
+    /// True when the Competitive board is sample data (only after the live API failed).
     var competitiveIsMock: Bool { get }
     var meId: String? { get }
 
-    /// `GET /api/hall-of-fame?category=skillRating&page=&pageSize=` (no login needed; `myRank`
-    /// only with a session).
+    /// `GET /api/hall-of-fame?category=skillRating&page=&pageSize=`
     func skillPage(page: Int, pageSize: Int) async throws -> UMSkillPage
-    /// `GET /api/competitive/seasons`
+    /// `GET /api/competitive/seasons`, newest season first.
     func seasons() async throws -> [UMSeasonSummary]
     /// `GET /api/competitive/roundInfo?seasonNumber=&roundNumber=`
     func round(_ ref: UMRoundRef) async throws -> UMRoundDetail
-    /// `GET /api/competitive/season/:n`
+    /// `GET /api/competitive/season/:n` (accounted prestige only).
     func seasonStandings(_ season: Int) async throws -> [UMSeasonStanding]
-    /// One player's fortune / score per round in a season. No endpoint: the server keeps no
-    /// per-round fortune snapshot, so this is mock-only until the server stores one.
-    func history(playerId: String, season: Int) async throws -> [UMPlayerRoundPoint]
-    func competitors(season: Int) async throws -> [UMCompetitor]
 }
 
-/// Everything from `MockLeaderboardData`. Used by the DEBUG `-UMDiagLeaderboard` screenshots.
+/// Everything from `MockLeaderboardData`. Used by the DEBUG `-UMDiagLeaderboard` screenshots
+/// and as the fallback when the live API fails.
 final class UMMockLeaderboardService: UMLeaderboardService {
     let data: MockLeaderboardData
     init(data: MockLeaderboardData = .shared) { self.data = data }
@@ -45,25 +40,17 @@ final class UMMockLeaderboardService: UMLeaderboardService {
         return d
     }
     func seasonStandings(_ season: Int) async throws -> [UMSeasonStanding] { data.seasonStandings(season) }
-    func history(playerId: String, season: Int) async throws -> [UMPlayerRoundPoint] {
-        data.history(playerId: playerId, season: season)
-    }
-    func competitors(season: Int) async throws -> [UMCompetitor] { data.competitors(season: season) }
 }
 
-/// Skill board live from the Hall of Fame (public endpoint), falling back to the mock if the
-/// request fails. Competitive stays on the mock for now.
-///
-/// To wire competitive later: decode `/api/competitive/seasons` into `UMSeasonSummary`
-/// (`openPhaseEndedAt != nil` -> `openPhaseEnded`), `/roundInfo` into `UMRoundDetail`
-/// (`standings[].ranking` is 0-based, `points` is round fortune; `gameCompletions` become
-/// `games`, and an empty list on an old round means the games expired), and `/season/:n` into
-/// `UMSeasonStanding` (`points` there is prestige, `tiebreakerPoints` is cumulative fortune).
+/// Live site data for both boards. No login is needed for any of these reads. If the first
+/// competitive read fails, the competitive board switches to sample data (and says so).
 final class UMLiveLeaderboardService: UMLeaderboardService {
     private let mock = UMMockLeaderboardService()
     private(set) var skillIsMock = false
+    private(set) var competitiveIsMock = false
     let meId: String?
-    var competitiveIsMock: Bool { true }
+    private var roundCache: [UMRoundRef: UMRoundDetail] = [:]
+    private var seasonCache: [Int: [UMSeasonStanding]] = [:]
 
     init(meId: String?) { self.meId = meId }
 
@@ -80,11 +67,39 @@ final class UMLiveLeaderboardService: UMLeaderboardService {
             return try await mock.skillPage(page: page, pageSize: pageSize)
         }
     }
-    func seasons() async throws -> [UMSeasonSummary] { try await mock.seasons() }
-    func round(_ ref: UMRoundRef) async throws -> UMRoundDetail { try await mock.round(ref) }
-    func seasonStandings(_ season: Int) async throws -> [UMSeasonStanding] { try await mock.seasonStandings(season) }
-    func history(playerId: String, season: Int) async throws -> [UMPlayerRoundPoint] {
-        try await mock.history(playerId: playerId, season: season)
+
+    func seasons() async throws -> [UMSeasonSummary] {
+        do {
+            let data = try await APIClient.shared.request("GET", path: "competitive/seasons", query: [:], body: nil)
+            let list = UMCompetitiveParse.seasons(data)
+            guard !list.isEmpty else { throw UMError.message("No seasons yet.") }
+            competitiveIsMock = false
+            return list
+        } catch {
+            competitiveIsMock = true
+            return try await mock.seasons()
+        }
     }
-    func competitors(season: Int) async throws -> [UMCompetitor] { try await mock.competitors(season: season) }
+
+    func round(_ ref: UMRoundRef) async throws -> UMRoundDetail {
+        if competitiveIsMock { return try await mock.round(ref) }
+        if let hit = roundCache[ref] { return hit }
+        let data = try await APIClient.shared.request("GET", path: "competitive/roundInfo", query: [
+            "seasonNumber": String(ref.season), "roundNumber": String(ref.number),
+        ], body: nil)
+        guard let d = UMCompetitiveParse.roundInfo(data, now: Date()) else {
+            throw UMError.message("Season \(ref.season) round \(ref.number) has no data.")
+        }
+        roundCache[ref] = d
+        return d
+    }
+
+    func seasonStandings(_ season: Int) async throws -> [UMSeasonStanding] {
+        if competitiveIsMock { return try await mock.seasonStandings(season) }
+        if let hit = seasonCache[season] { return hit }
+        let data = try await APIClient.shared.request("GET", path: "competitive/season/\(season)", query: [:], body: nil)
+        let rows = UMCompetitiveParse.season(data)
+        seasonCache[season] = rows
+        return rows
+    }
 }

@@ -19,6 +19,8 @@ final class MockLeaderboardData {
     private(set) var skill: [UMSkillEntry] = []
     private(set) var seasons: [UMSeasonSummary] = []
     private(set) var details: [UMRoundRef: UMRoundDetail] = [:]
+    /// Full standings even for expired rounds, so season totals add up.
+    private var fullStandings: [UMRoundRef: [UMRoundStanding]] = [:]
 
     private static let names = [
         "Vinman", "Pranay", "nightcrawler", "QuietCop", "Lazarus", "hollowpoint", "Mira", "ghostlamp",
@@ -182,8 +184,11 @@ final class MockLeaderboardData {
         case .review: UMNextEvent(type: "account", date: now.addingTimeInterval(1 * Self.day + 3600 * 9 + 600))
         default: nil
         }
+        let table = UMRoundDetail.standings(totals: rows)
+        fullStandings[r.ref] = table
+        // Like the real API: once games expire there is no trustworthy round table.
         return UMRoundDetail(season: r.ref.season, round: r,
-                             standings: UMRoundDetail.standings(totals: rows),
+                             standings: detailed ? table : [],
                              games: detailed ? games.sorted { $0.endTime > $1.endTime } : nil,
                              nextEvent: next)
     }
@@ -201,7 +206,7 @@ final class MockLeaderboardData {
         var prestige: [String: Int] = [:]
         var fortune: [String: Int] = [:]
         for (ref, d) in details where ref.season == season && d.round.accounted {
-            for s in d.standings {
+            for s in fullStandings[ref] ?? [] {
                 prestige[s.player.id, default: 0] += s.prestige
                 fortune[s.player.id, default: 0] += s.fortune
             }
@@ -217,7 +222,7 @@ final class MockLeaderboardData {
         guard let s = seasons.first(where: { $0.number == season }) else { return [] }
         return s.rounds.filter(\.hasStarted).map { r in
             let d = details[r.ref]
-            let row = d?.standings.first { $0.player.id == playerId }
+            let row = fullStandings[r.ref]?.first { $0.player.id == playerId }
             let score = d?.games.map { $0.reduce(0) { $0 + ($1.earned[playerId] ?? 0) } }
             let games = d?.games.map { $0.filter { $0.earned[playerId] != nil }.count }
             return UMPlayerRoundPoint(round: r.ref.number, fortune: row?.fortune ?? 0, ranking: row?.ranking,

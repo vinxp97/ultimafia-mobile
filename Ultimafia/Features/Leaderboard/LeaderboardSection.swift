@@ -24,24 +24,35 @@ struct LeaderboardSectionView: View {
 }
 
 #if DEBUG
-/// `-UMDiagLeaderboard [skill|competitive|competitive-review|competitive-old]`: the Leaderboard
-/// section inside the real tab bar with sample data only (no network, no account).
+/// `-UMDiagLeaderboard <mode>`: the Leaderboard section inside the real tab bar.
+/// Sample data (offline): `skill`, `competitive` (hero round), `competitive-past` (previous
+/// rounds, first expanded), `competitive-season` (season standings), `competitive-expired`
+/// (an older season whose games are gone). Prefix `live-` (e.g. `live-competitive`) to read the
+/// real public endpoints instead.
 struct UMDiagLeaderboardView: View {
     var mode: String
-    private let service = UMMockLeaderboardService()
+    private let service: UMLeaderboardService
 
-    private var tab: UMLeaderboardTab { mode.hasPrefix("competitive") ? .competitive : .skill }
-    private var round: UMRoundRef? {
-        switch mode {
-        case "competitive-old": UMRoundRef(season: 3, number: 2)
-        case "competitive-review": UMRoundRef(season: 3, number: 5)
+    init(mode: String) {
+        self.mode = mode
+        service = mode.hasPrefix("live-") ? UMLiveLeaderboardService(meId: nil) : UMMockLeaderboardService()
+    }
+
+    private var base: String { mode.hasPrefix("live-") ? String(mode.dropFirst(5)) : mode }
+    private var tab: UMLeaderboardTab { base.hasPrefix("competitive") ? .competitive : .skill }
+    private var season: Int? { base == "competitive-expired" && !mode.hasPrefix("live-") ? 2 : nil }
+    private var anchor: String? {
+        switch base {
+        case "competitive-past": "past"
+        case "competitive-season": "season"
+        case "competitive-seasons": "seasons"
         default: nil
         }
     }
 
     var body: some View {
         let page = AnyView(NavigationStack {
-            LeaderboardView(service: service, tab: tab, initialRound: round).umNavigationBar(.hidden)
+            LeaderboardView(service: service, tab: tab, initialSeason: season, anchor: anchor).umNavigationBar(.hidden)
         })
         #if os(iOS)
         NativeAppTabs(
