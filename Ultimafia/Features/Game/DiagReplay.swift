@@ -516,6 +516,27 @@ struct DiagReplayView: View {
         // time, a spectator quote, the Spectators list; postgame: no composer. What you send is
         // echoed back the way the server would (speak -> message in that meeting, quote -> quote);
         // join answers takeSeat with isSpectator false + playerJoin, joinfail with takeSeatFailed.
+        // Offline quote regression fixture: short, wrapped, explicit newlines, and a long header.
+        // Quotes cannot themselves be quoted (canQuote rejects isQuote).
+        if args.contains("-UMDiagQuotes") {
+            let t = Date().timeIntervalSince1970 * 1000 - 180_000
+            s.debugFeed("state", ["id": 2, "name": "Day", "dayCount": 2])
+            s.debugFeed("meeting", ["id": "village", "name": "Village", "speech": true,
+                                    "amMember": true, "canTalk": true])
+            let texts = ["I checked Alice last night.",
+                         "We should read yesterday's votes before deciding. Bob moved off Alice at the very last second, but never explained why. What does everyone think about that?",
+                         "First line: watch the votes.\nSecond line: compare the claims.\nThird line: give everyone time to answer."]
+            for (i, text) in texts.enumerated() {
+                s.debugFeed("message", ["id": "quote-source-\(i)", "senderId": "p\(i + 1)",
+                                        "content": text, "time": t + Double(i) * 1000, "meetingId": "village"])
+            }
+            for i in texts.indices {
+                s.debugFeed("quote", ["id": "layout-\(i)", "messageId": "quote-source-\(i)", "senderId": "p0",
+                                      "toMeetingId": "village", "fromMeetingId": "village", "fromState": 2,
+                                      "time": t + 10_000 + Double(i) * 1000])
+            }
+            return
+        }
         // `-UMDiagReplies` (with -UMDiagReplay): you hold seat p0 on Day 2. Styled players (name
         // colour + BettyNoir font + text colour, gradient name, stickers), replies merged with their
         // quote, a reply whose original is a sticker, a reply carrying a sticker, a reply to a line

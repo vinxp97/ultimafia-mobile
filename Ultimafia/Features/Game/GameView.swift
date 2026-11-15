@@ -1781,51 +1781,67 @@ private struct ChatRow: View {
     private func messageBody(player: GamePlayer?) -> some View {
         let me = line.content.hasPrefix("/me ")
         let body = me ? String(line.content.dropFirst(4)) : line.content
-        HStack(alignment: .top, spacing: 4) {
-            if line.isQuote {
+        if line.isQuote {
+            quoteBlock(body: body, compact: false)
+        } else {
+            HStack(alignment: .top, spacing: 4) {
+                if let prefix = line.prefix, !prefix.isEmpty {
+                    Text(prefix)
+                        .font(.caption2.italic())
+                        .foregroundStyle(UMTheme.muted)
+                        .fixedSize()
+                }
+                EmoteText(
+                    text: body,
+                    color: chatBodyColor(player: player),
+                    italic: me,
+                    customEmotes: player?.customEmotes ?? line.customEmotes,
+                    customStickers: player?.customStickers ?? line.customStickers,
+                    system: false,
+                    players: session.players,
+                    gameType: session.setupGameType,
+                    otherRoles: session.guessableRoles.map(\.raw)
+                )
+            }
+        }
+    }
+
+    /// A quote reads like ultimafia.com's quote line, but stacked for a phone: the
+    /// "time Name on Phase:" header on its own line, then the quoted text below it at full width.
+    /// Laying both in one HStack pinned the fixed-size header in a left column and squeezed the
+    /// text into the leftover right column.
+    private func quoteBlock(body: String, compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Image(systemName: "quote.opening")
                     .font(.caption2)
                     .foregroundStyle(UMTheme.muted)
-                    .padding(.top, 3)
-            }
-            if line.isQuote {
+                // Compact rows have no name header, so the spectator tag rides on the quote header.
+                if compact, session.isSpectatorChatLine(line) { SpectatorChatTag() }
                 quoteAuthorLabel
             }
-            if let prefix = line.prefix, !prefix.isEmpty {
-                Text(prefix)
-                    .font(.caption2.italic())
-                    .foregroundStyle(UMTheme.muted)
-                    .fixedSize()
-            }
+            // The closing mark follows the last word like the web's inline fa-quote-right,
+            // instead of floating at the row's far edge.
             EmoteText(
-                text: body,
-                color: line.isQuote ? UMTheme.muted : chatBodyColor(player: player),
-                italic: me || line.isQuote,
-                customEmotes: line.isQuote ? line.customEmotes : (player?.customEmotes ?? line.customEmotes),
-                customStickers: line.isQuote ? line.customStickers : (player?.customStickers ?? line.customStickers),
+                text: QuoteFormat.body(body),
+                color: UMTheme.muted,
+                italic: true,
+                customEmotes: line.customEmotes,
+                customStickers: line.customStickers,
                 system: false,
                 players: session.players,
                 gameType: session.setupGameType,
                 otherRoles: session.guessableRoles.map(\.raw)
             )
-            if line.isQuote {
-                Image(systemName: "quote.closing")
-                    .font(.caption2)
-                    .foregroundStyle(UMTheme.muted)
-                    .padding(.top, 3)
-            }
+            // Standard rows already inset the whole message body.
+            .padding(.leading, compact ? textInset : 0)
         }
-    }
-
-    private var quotedAuthor: String {
-        if let name = line.quotedSenderName, !name.isEmpty { return name }
-        if line.quotedSenderId == "anonymous" { return "Anonymous" }
-        return "Anonymous"
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
     private var quoteAuthorLabel: some View {
-        let name = quotedAuthor
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             if let quotedTime = line.quotedTime {
                 Text(minuteSecond(quotedTime))
@@ -1833,19 +1849,11 @@ private struct ChatRow: View {
                     .foregroundStyle(UMTheme.muted)
                     .fixedSize()
             }
-            if let phase = line.quotedFromStateName, !phase.isEmpty {
-                Text("\(name) on \(phase):")
-                    .font(.caption.italic())
-                    .foregroundStyle(UMTheme.muted)
-                    .fixedSize()
-            } else {
-                Text("\(name):")
-                    .font(.caption.italic())
-                    .foregroundStyle(UMTheme.muted)
-                    .fixedSize()
-            }
+            Text(QuoteFormat.header(name: line.quotedSenderName, phase: line.quotedFromStateName))
+            .font(.caption.italic())
+            .foregroundStyle(UMTheme.muted)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .fixedSize()
     }
 
     @ViewBuilder
@@ -1865,62 +1873,48 @@ private struct ChatRow: View {
         .anchorPreference(key: ReplyAvatarAnchorKey.self, value: .bounds) { ["main": $0] }
 
         if line.isQuote {
-            Image(systemName: "quote.opening")
-                .font(.caption2)
-                .foregroundStyle(UMTheme.muted)
-                .padding(.top, 3)
-        }
-
-        Group {
-            if line.isQuote {
-                quoteAuthorLabel
-            } else if let player {
-                HStack(spacing: 0) {
-                                PlayerNameView(player: player, fontSize: 14, dead: session.deadStyled(line))
-                                if session.showsDeadSuffix(line) {
-                                    Text(" (dead)")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(UMTheme.deadName)
+            quoteBlock(body: body, compact: true)
+        } else {
+            Group {
+                if let player {
+                    HStack(spacing: 0) {
+                                    PlayerNameView(player: player, fontSize: 14, dead: session.deadStyled(line))
+                                    if session.showsDeadSuffix(line) {
+                                        Text(" (dead)")
+                                            .font(.system(size: 14))
+                                            .foregroundStyle(UMTheme.deadName)
+                                    }
+                                    if session.isSpectatorChatLine(line) {
+                                        SpectatorChatTag().padding(.leading, 5)
+                                    } else if session.isSpectatorSender(line) {
+                                        SpectatorNameMark()
+                                    }
                                 }
-                                if session.isSpectatorChatLine(line) {
-                                    SpectatorChatTag().padding(.leading, 5)
-                                } else if session.isSpectatorSender(line) {
-                                    SpectatorNameMark()
-                                }
-                            }
-            } else {
-                Text(line.senderId == "anonymous" ? "Anonymous" : line.senderName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.white)
+                } else {
+                    Text(line.senderId == "anonymous" ? "Anonymous" : line.senderName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.white)
+                }
             }
-        }
-        .fixedSize()
-        if let prefix = line.prefix, !prefix.isEmpty {
-            Text(prefix)
-                .font(.caption2.italic())
-                .foregroundStyle(UMTheme.muted)
-                .fixedSize()
-        }
-        // Quote rows show the quote label instead of the name, so the tag goes before the text.
-        if line.isQuote, session.isSpectatorChatLine(line) { SpectatorChatTag() }
-
-        EmoteText(
-            text: body,
-            color: line.isQuote ? UMTheme.muted : chatBodyColor(player: player),
-            italic: me || line.isQuote,
-            customEmotes: line.isQuote ? line.customEmotes : (player?.customEmotes ?? line.customEmotes),
-            customStickers: line.isQuote ? line.customStickers : (player?.customStickers ?? line.customStickers),
-            system: false,
-            players: session.players,
-            gameType: session.setupGameType,
-            otherRoles: session.guessableRoles.map(\.raw)
-        )
-        .padding(.leading, textInset)
-        if line.isQuote {
-            Image(systemName: "quote.closing")
-                .font(.caption2)
-                .foregroundStyle(UMTheme.muted)
-                .padding(.top, 3)
+            .fixedSize()
+            if let prefix = line.prefix, !prefix.isEmpty {
+                Text(prefix)
+                    .font(.caption2.italic())
+                    .foregroundStyle(UMTheme.muted)
+                    .fixedSize()
+            }
+            EmoteText(
+                text: body,
+                color: chatBodyColor(player: player),
+                italic: me,
+                customEmotes: player?.customEmotes ?? line.customEmotes,
+                customStickers: player?.customStickers ?? line.customStickers,
+                system: false,
+                players: session.players,
+                gameType: session.setupGameType,
+                otherRoles: session.guessableRoles.map(\.raw)
+            )
+            .padding(.leading, textInset)
         }
     }
 
