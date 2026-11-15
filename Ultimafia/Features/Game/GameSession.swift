@@ -413,7 +413,9 @@ final class GameSession {
     private var token: String?
     private var didJoin = false
     /// App Attest: a socket-pushed `appAttestChallenge` (sent just before authSuccess), and a join waiting on the assertion.
-    private var attestPushed: (challenge: String, socketNonce: String?)?
+    private var attestPushed: String?
+    /// From `authSuccess` or `appAttestChallenge`, whichever arrives first; fixed for this socket.
+    private var socketNonce: String?
     private var attestPending = false
     private var leftByServer = false
     private var isStarting = false
@@ -1543,9 +1545,13 @@ final class GameSession {
                 join()
             }
         case "authSuccess":
+            if socketNonce == nil { socketNonce = UMAttestWire.parseSocketNonce(data) }
             joinWithAttest()
         case "appAttestChallenge":
-            attestPushed = UMAttestWire.parseChallenge(data)
+            if let c = UMAttestWire.parseChallenge(data) {
+                attestPushed = c.challenge
+                if socketNonce == nil { socketNonce = c.socketNonce }
+            }
         case "playerClient":
             // A seated player reconnected from the other client: { playerId, client: "ios" | null }.
             if let o = data as? [String: Any], let id = (o["playerId"] as? String) ?? (o["id"] as? String) {
@@ -1761,16 +1767,17 @@ final class GameSession {
     private func joinWithAttest() {
         guard !didJoin, !attestPending else { return }
         #if targetEnvironment(simulator) && DEBUG
-        let canAttest = true          // devBypass
-        #else
-        let canAttest = UMAppAttest.shared.isSupported
+        // Simulator: devBypass needs no key or nonce (dev servers with APP_ATTEST_DEV_BYPASS=1).
+        if UMAppAttest.shared.userId != nil { return join(appAttest: UMAttestWire.devBypassField) }
         #endif
-        guard canAttest, let userId = UMAppAttest.shared.userId else { return join() }
+        let canAttest = UMAppAttest.shared.isSupported
+        // No socketNonce means nothing the server would accept: join without the icon.
+        guard canAttest, let userId = UMAppAttest.shared.userId, let nonce = socketNonce else { return join() }
         attestPending = true
         let pushed = attestPushed
         Task { @MainActor [weak self] in
             let field = await UMAppAttest.withTimeout(seconds: 3) {
-                await UMAppAttest.shared.joinField(userId: userId, pushed: pushed)
+                await UMAppAttest.shared.joinField(userId: userId, socketChallenge: pushed, socketNonce: nonce)
             }
             guard let self else { return }
             self.attestPending = false

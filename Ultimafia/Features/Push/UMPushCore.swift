@@ -309,10 +309,17 @@ nonisolated enum UMAttestWire {
 
     /// Per-socket clientData: UTF-8(challenge) + UTF-8(socketNonce), no base64 decode (contract).
     /// The app signs SHA256(clientData).
-    static func clientData(challenge: String, socketNonce: String?) -> Data {
+    /// The nonce is required: the server refuses challenge-only signatures.
+    static func clientData(challenge: String, socketNonce: String) -> Data {
         var d = Data(challenge.utf8)
-        if let socketNonce { d.append(Data(socketNonce.utf8)) }
+        d.append(Data(socketNonce.utf8))
         return d
+    }
+
+    /// `socketNonce` from `authSuccess` or `appAttestChallenge` (same value, fixed for the socket).
+    static func parseSocketNonce(_ any: Any?) -> String? {
+        guard let o = any as? [String: Any], let n = o["socketNonce"] as? String, !n.isEmpty else { return nil }
+        return n
     }
 
     /// GET /api/appattest/challenge -> { challenge, ttlSec }. Also accepts the socket's

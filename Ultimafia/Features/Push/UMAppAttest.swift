@@ -139,9 +139,10 @@ final class UMAppAttest {
     }
 
     /// The `appAttest` object for the game `join` payload, or nil to join without it.
-    /// `pushed` is the socket's `appAttestChallenge` (sent just before `authSuccess`). If it was
-    /// missed, a challenge from GET /api/appattest/challenge is signed and echoed as `challenge`.
-    func joinField(userId: String?, pushed: (challenge: String, socketNonce: String?)?) async -> [String: Any]? {
+    /// `socketChallenge` is the socket's `appAttestChallenge`. If it was missed, a challenge from
+    /// GET /api/appattest/challenge is signed instead and echoed as `challenge`. Both are signed as
+    /// SHA256(utf8(challenge) + utf8(socketNonce)); there is no challenge-only path.
+    func joinField(userId: String?, socketChallenge: String?, socketNonce: String) async -> [String: Any]? {
         #if targetEnvironment(simulator)
         #if DEBUG
         // Simulator: no Secure Enclave. Dev servers with APP_ATTEST_DEV_BYPASS=1 accept this.
@@ -151,15 +152,14 @@ final class UMAppAttest {
         #endif
         #elseif canImport(DeviceCheck) && os(iOS)
         guard let userId, let keyId = await enrolledKey(userId: userId) else { return nil }
-        var challenge: String
+        let challenge: String
         var httpChallenge: String?
-        let nonce = pushed?.socketNonce
-        if let pushed { challenge = pushed.challenge } else {
+        if let socketChallenge { challenge = socketChallenge } else {
             guard let ch = await UMPush.backend.attestChallenge() else { return nil }
             challenge = ch.challenge
             httpChallenge = ch.challenge
         }
-        let hash = Data(SHA256.hash(data: UMAttestWire.clientData(challenge: challenge, socketNonce: nonce)))
+        let hash = Data(SHA256.hash(data: UMAttestWire.clientData(challenge: challenge, socketNonce: socketNonce)))
         do {
             let assertion = try await DCAppAttestService.shared.generateAssertion(keyId, clientDataHash: hash)
             return UMAttestWire.joinField(keyId: keyId, assertion: assertion, httpChallenge: httpChallenge)

@@ -163,7 +163,11 @@ struct PushAttestTests {
 
     static func attestWire() {
         equal(UMAttestWire.clientData(challenge: "abc", socketNonce: "s1"), Data("abcs1".utf8), "challenge || socket nonce")
-        equal(UMAttestWire.clientData(challenge: "abc", socketNonce: nil), Data("abc".utf8), "challenge only")
+        equal(UMAttestWire.clientData(challenge: "hc", socketNonce: "n9"), Data("hcn9".utf8), "HTTP fallback signs challenge + socket nonce too")
+        equal(UMAttestWire.parseSocketNonce(["socketNonce": "n1"]), "n1", "nonce from authSuccess")
+        equal(UMAttestWire.parseSocketNonce(["challenge": "c", "ttlSec": 120, "socketNonce": "n2"]), "n2", "nonce from appAttestChallenge")
+        equal(UMAttestWire.parseSocketNonce(nil), nil, "bare authSuccess: no nonce -> skip attest")
+        equal(UMAttestWire.parseSocketNonce(["socketNonce": ""]), nil, "empty nonce -> skip attest")
         let c = UMAttestWire.parseChallenge(["challenge": "xyz", "ttlSec": 120])
         equal(c?.challenge, "xyz", "challenge parsed")
         check(c?.socketNonce == nil, "no nonce over HTTP")
