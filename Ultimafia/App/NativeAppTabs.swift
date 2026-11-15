@@ -15,6 +15,7 @@ struct NativeAppTabs: UIViewControllerRepresentable {
     var showsMessages: Bool = true
     var messagesBadge: Int = 0
     var play: AnyView
+    var leaderboard: AnyView = AnyView(EmptyView())
     var messages: AnyView = AnyView(EmptyView())
     var game: AnyView
     var you: AnyView
@@ -55,6 +56,7 @@ struct NativeAppTabs: UIViewControllerRepresentable {
             loadViewIfNeeded()
             onSelect = config.onSelect
             pages[.play]?.rootView = config.play
+            pages[.leaderboard]?.rootView = config.leaderboard
             pages[.messages]?.rootView = config.messages
             pages[.messages]?.tabBarItem.badgeValue = config.messagesBadge > 0 ? String(config.messagesBadge) : nil
             if messagesShown != config.showsMessages {

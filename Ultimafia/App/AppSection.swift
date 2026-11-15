@@ -6,13 +6,14 @@ import Foundation
 ///
 /// A standalone value type so the pure-logic tests can compile it without the app.
 enum UMAppSection: String, CaseIterable, Hashable, Identifiable {
-    case play, messages, game, you
+    case play, leaderboard, messages, game, you
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .play: "Lobby"
+        case .leaderboard: "Leaderboard"
         case .messages: "Messages"
         case .game: "Game"
         case .you: "You"
@@ -22,6 +23,7 @@ enum UMAppSection: String, CaseIterable, Hashable, Identifiable {
     var symbol: String {
         switch self {
         case .play: "list.bullet.rectangle"
+        case .leaderboard: "chart.bar.xaxis"
         case .messages: "bubble.left.and.bubble.right"
         case .game: "gamecontroller"
         case .you: "person"

@@ -8,6 +8,7 @@ extension AppModel {
         switch section {
         case .play: !path.isEmpty
         case .game: !gamePath.isEmpty || game == nil
+        case .leaderboard: true
         case .messages, .you: true
         }
     }
@@ -17,6 +18,7 @@ extension AppModel {
         case .play: if !path.isEmpty { path.removeLast() }
         case .game: if !gamePath.isEmpty { gamePath.removeLast() } else if game == nil { goToLobby() }
         case .you: if !youPath.isEmpty { youPath.removeLast() } else { goToLobby() }
+        case .leaderboard: if !leaderboardPath.isEmpty { leaderboardPath.removeLast() } else { goToLobby() }
         case .messages: goToLobby()
         }
     }

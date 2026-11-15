@@ -36,6 +36,8 @@ final class AppModel {
     var path: [Route] = []
     /// The Game section's own stack: the live game and anything pushed from it.
     var gamePath: [Route] = []
+    /// The Leaderboard section's stack (profiles opened from a board).
+    var leaderboardPath: [Route] = []
     /// Leaving / detaching / a new game drops the old session's pinned images.
     var game: GameSession? {
         didSet { if let old = oldValue, old !== game { UMImageCache.shared.unpin(scope: old.assetScope) } }
@@ -88,6 +90,7 @@ final class AppModel {
         switch target {
         case .play: goToLobby()
         case .game: gamePath.removeAll()
+        case .leaderboard: leaderboardPath.removeAll()
         case .messages: break
         case .you: youPath.removeAll()
         }
@@ -223,6 +226,7 @@ final class AppModel {
         path = []
         gamePath = []
         youPath = []
+        leaderboardPath = []
         section = .play
         isViewingGame = false
         showLeaveConfirm = false
@@ -597,6 +601,7 @@ final class AppModel {
         case .play, .messages: path.append(route)
         case .game: gamePath.append(route)
         case .you: youPath.append(route)
+        case .leaderboard: leaderboardPath.append(route)
         }
     }
 

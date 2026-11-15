@@ -83,6 +83,16 @@ struct LobbyView: View {
             .accessibilityLabel("Ultimafia Mobile")
             .accessibilityHint("Pull down to refresh")
             Spacer(minLength: 0)
+            // The way into the Leaderboard section from the lobby, beside Host.
+            Button { app.select(.leaderboard) } label: {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 34, height: 34)
+                    .background(UMTheme.card, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .accessibilityLabel("Leaderboard")
             // Hosting belongs to the lobby rather than a section of its own, the way the website has
             // it, so the way in lives in the lobby header and the bar never moves for it.
             if !app.hasCurrentGame {

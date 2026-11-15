@@ -28,6 +28,9 @@ struct ContentView: View {
                 #else
                 Text(section)
                 #endif
+            } else if let i = ProcessInfo.processInfo.arguments.firstIndex(of: "-UMDiagLeaderboard") {
+                UMDiagLeaderboardView(mode: ProcessInfo.processInfo.arguments.indices.contains(i + 1)
+                                      ? ProcessInfo.processInfo.arguments[i + 1] : "skill")
             } else if let i = ProcessInfo.processInfo.arguments.firstIndex(of: "-UMDiagMessages") {
                 DiagMessagesView(screen: ProcessInfo.processInfo.arguments.indices.contains(i + 1)
                                  ? ProcessInfo.processInfo.arguments[i + 1] : "public")
@@ -107,6 +110,7 @@ struct MainTabs: View {
                 showsMessages: !inGame,
                 messagesBadge: inGame ? 0 : UMChatStore.shared.unreadDMCount,
                 play: AnyView(LobbyView().environment(app)),
+                leaderboard: AnyView(LeaderboardSectionView().environment(app)),
                 messages: AnyView(MessagesView().environment(app)),
                 game: AnyView(GameSectionView().environment(app)),
                 you: AnyView(ProfileView().environment(app)),

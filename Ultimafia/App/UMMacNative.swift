@@ -13,6 +13,7 @@ struct NativeAppTabs: View {
     var showsMessages: Bool
     var messagesBadge: Int
     var play: AnyView
+    var leaderboard: AnyView = AnyView(EmptyView())
     var messages: AnyView
     var game: AnyView
     var you: AnyView
@@ -80,6 +81,7 @@ struct NativeAppTabs: View {
                         play
                     }
                 }
+                page(.leaderboard) { leaderboard }
                 page(.messages) { messages }
                 page(.game) { game }
                 page(.you) { you }
