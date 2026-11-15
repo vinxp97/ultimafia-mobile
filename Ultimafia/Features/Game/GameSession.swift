@@ -27,6 +27,8 @@ struct GamePlayer: Identifiable, Hashable {
     var playerListPosition: Double? = nil
     var customEmotes: [String: String] = [:]
     var customStickers: [String: String] = [:]
+    /// Optional `client` from getPlayerInfo (PROPOSED): "ios" when the server verified App Attest.
+    var client: String? = nil
 }
 
 /// Game-screen hardware keyboard shortcuts (Option+arrows).
@@ -262,6 +264,8 @@ final class GameSession {
     var anonymousDeckIds: [String] = []
     var rankedGame = false
     var competitiveGame = false
+    /// Anonymous games hide the iOS badge, the way the site hides profile links (contract §2c).
+    var anonymousGame = false
     /// options.spectating: the lobby allows spectators (web shows the pregame Spectate button only then).
     var spectatingAllowed = false
     /// "spectate" sent, waiting for `isSpectator` or `spectateFailed`.
@@ -408,6 +412,9 @@ final class GameSession {
     private let socket = GameSocket()
     private var token: String?
     private var didJoin = false
+    /// App Attest: a socket-pushed `appAttestChallenge` (PROPOSED), and a join waiting on the assertion.
+    private var attestPushed: (challenge: String, socketNonce: String?)?
+    private var attestPending = false
     private var leftByServer = false
     private var isStarting = false
     private var expectDisconnect = false
@@ -1536,7 +1543,16 @@ final class GameSession {
                 join()
             }
         case "authSuccess":
-            join()
+            joinWithAttest()
+        case "appAttestChallenge":
+            attestPushed = UMAttestWire.parseChallenge(data)
+        case "playerClient":
+            // PROPOSED: a seated player attested after joining; { playerId, client }.
+            if let o = data as? [String: Any], let id = (o["playerId"] as? String) ?? (o["id"] as? String) {
+                let client = UMPlayerClient.parse(o)
+                if let i = players.firstIndex(where: { $0.id == id }) { players[i].client = client }
+                if spectatorPlayers[id] != nil { spectatorPlayers[id]?.client = client }
+            }
         case "loaded":
             loaded = true
             GameWinMusic.unlockSession()
@@ -1557,6 +1573,7 @@ final class GameSession {
                     anonymousDeckIds = decks.compactMap { ($0 as? [String: Any])?["id"] as? String }
                 }
                 competitiveGame = (o["competitive"] as? Bool) ?? false
+                anonymousGame = (o["anonymousGame"] as? Bool) ?? ((o["anonymousGame"] as? String) == "true")
                 // Web settingIsTrueValue: true or "true".
                 spectatingAllowed = (o["spectating"] as? Bool) ?? ((o["spectating"] as? String) == "true")
                 graveyardParticipation = (o["graveyardParticipation"] as? Bool) ?? false
@@ -1738,13 +1755,33 @@ final class GameSession {
         }
     }
 
-    private func join() {
+    /// Signed-in join: attach `appAttest { keyId, assertion }` when this device can produce one
+    /// (contract §2c: after socket auth, on `join`). Fail open: unsupported, Simulator, a missing
+    /// backend, an error, or 3 seconds without an answer all just join without it.
+    private func joinWithAttest() {
+        guard !didJoin, !attestPending else { return }
+        guard UMAppAttest.shared.isSupported, let userId = UMAppAttest.shared.userId else { return join() }
+        attestPending = true
+        let pushed = attestPushed
+        Task { @MainActor [weak self] in
+            let field = await UMAppAttest.withTimeout(seconds: 3) {
+                await UMAppAttest.shared.joinField(userId: userId, pushed: pushed)
+            }
+            guard let self else { return }
+            self.attestPending = false
+            self.join(appAttest: field)
+        }
+    }
+
+    private func join(appAttest: [String: Any]? = nil) {
         guard !didJoin else { return }
         didJoin = true
-        socket.send("join", object: [
+        var payload: [String: Any] = [
             "gameId": gameId,
             "isBot": false,
-        ])
+        ]
+        if let appAttest { payload["appAttest"] = appAttest }
+        socket.send("join", object: payload)
     }
 
     private func ingestHistory(_ data: Any?) {
@@ -2061,7 +2098,8 @@ final class GameSession {
             nameGradientColorC: umColorString(settings["nameGradientColorC"]),
             playerListPosition: umFiniteListPosition(obj["playerListPosition"]),
             customEmotes: mediaMap(settings["customEmotes"] ?? obj["customEmotes"]),
-            customStickers: mediaMap(settings["customStickers"] ?? obj["customStickers"])
+            customStickers: mediaMap(settings["customStickers"] ?? obj["customStickers"]),
+            client: UMPlayerClient.parse(obj)
         )
     }
 

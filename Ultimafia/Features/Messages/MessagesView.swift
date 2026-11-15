@@ -1,4 +1,8 @@
 import SwiftUI
+import UserNotifications
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Messages tab (hidden in games): Public chat (the site's home chat rooms) or Direct messages.
 struct MessagesView: View {
@@ -448,29 +452,43 @@ private struct ChatComposerBar: View {
     }
 }
 
-/// You tab: DM notification options (client-side) + game-invite placeholder.
+/// You tab: this device's push notifications, as their own list (Vinman). The master switch hides
+/// every per-type row when off; turning it on turns every type on, and each can then be switched
+/// off on its own. Settings are per device (iCloud key-value store, keyed by the install id) and
+/// ride along with the device token to the server, which filters pushes per device.
 struct DMNotificationSettingsSection: View {
-    @AppStorage(UMDMNotify.enabledKey) private var enabled = false
+    @State private var prefs = UMPushPrefs.shared
     @AppStorage(UMDMNotify.soundKey) private var sound = true
     @AppStorage(UMDMNotify.previewKey) private var preview = true
-    @AppStorage(UMDMNotify.invitesKey) private var invites = false
-    @State private var denied = false
-    @AppStorage(UMNotifyMaster.key) private var master = false
+    @State private var systemDenied = false
     @State private var settingsAlert = false
 
+    /// No moving animations anywhere in this list (Vinman).
+    private func instantly(_ body: () -> Void) {
+        var t = Transaction(animation: nil)
+        t.disablesAnimations = true
+        withTransaction(t, body)
+    }
+
     private var masterBinding: Binding<Bool> {
-        Binding(get: { master }, set: { on in
-            if !on { UMNotifyMaster.set(false); return }
+        Binding(get: { prefs.master }, set: { on in
+            if !on { instantly { UMNotifyMaster.set(false) }; return }
             UMNotifyMaster.requestOn { r in
-                if r == .denied { settingsAlert = true }
-                denied = r != .on
+                instantly {
+                    systemDenied = r == .denied
+                    if r == .denied { settingsAlert = true }
+                }
             }
         })
     }
 
+    private func typeBinding(_ t: UMPushType) -> Binding<Bool> {
+        Binding(get: { prefs.isOn(t) }, set: { on in instantly { prefs.set(t, on) } })
+    }
+
     var body: some View {
         Section {
-            Toggle("Push notifications", isOn: masterBinding)
+            Toggle("Push Notifications", isOn: masterBinding)
                 .listRowBackground(UMTheme.card)
                 .alert("Notifications are off", isPresented: $settingsAlert) {
                     Button("Open Settings") { UMNotifyMaster.openSettings() }
@@ -478,31 +496,55 @@ struct DMNotificationSettingsSection: View {
                 } message: {
                     Text("Notifications for UltiMafia are disabled in iOS Settings. Turn them on there, then come back.")
                 }
-            Toggle("Direct message alerts", isOn: $enabled)
-                .disabled(!master)
-                .onChange(of: enabled) { _, on in
-                    guard on else { Task { await UMPush.unregister() }; return }
-                    UMDMNotify.requestPermission { granted in
-                        if !granted { enabled = false; denied = true }
+            if systemDenied && !prefs.master {
+                Button {
+                    UMNotifyMaster.openSettings()
+                } label: {
+                    HStack {
+                        Label("Allow notifications in iOS Settings", systemImage: "bell.slash")
+                        Spacer()
+                        Image(systemName: "arrow.up.forward.app").foregroundStyle(UMTheme.muted)
                     }
                 }
+                .foregroundStyle(.white)
                 .listRowBackground(UMTheme.card)
-            Toggle("Sound", isOn: $sound).disabled(!master || !enabled).listRowBackground(UMTheme.card)
-            Toggle("Show preview", isOn: $preview).disabled(!master || !enabled).listRowBackground(UMTheme.card)
-            Toggle(isOn: $invites) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Game invites")
-                    Text("Coming in a future update").font(.caption).foregroundStyle(UMTheme.muted)
+            }
+            if prefs.master {
+                ForEach(UMPushType.allCases, id: \.self) { t in
+                    Toggle(isOn: typeBinding(t)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t.title)
+                            Text(t.detail).font(.caption).foregroundStyle(UMTheme.muted)
+                        }
+                    }
+                    .listRowBackground(UMTheme.card)
+                    if t == .dms && prefs.isOn(.dms) {
+                        Toggle("Sound", isOn: $sound).padding(.leading, 16).listRowBackground(UMTheme.card)
+                        Toggle("Show preview", isOn: $preview).padding(.leading, 16).listRowBackground(UMTheme.card)
+                    }
                 }
             }
-            .disabled(true)
-            .listRowBackground(UMTheme.card)
         } header: {
-            Text("Notifications")
+            Text("Push Notifications")
         } footer: {
-            Text(denied
-                 ? "Notifications are off for UltiMafia in iOS Settings. Turn them on there to get DM alerts."
-                 : "Push notifications covers every alert on this device for all accounts: ready checks, mentions and kicks while the app is in the background, and DMs (never during a game). Alerts with the app fully closed are coming later.")
+            Text(prefs.master
+                 ? "For this device only, and saved to iCloud so they come back after a reinstall. Ready checks, mentions and kicks also alert while the app is in the background; DMs never alert during a game."
+                 : (systemDenied
+                    ? "Notifications are off for UltiMafia in iOS Settings."
+                    : "Off on this device. Turn on to choose which alerts you get."))
         }
+        .transaction { $0.disablesAnimations = true; $0.animation = nil }
+        .animation(nil, value: prefs.master)
+        .animation(nil, value: prefs.settings)
+        .task { await refreshDenied() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            Task { await refreshDenied() }
+        }
+    }
+
+    private func refreshDenied() async {
+        let s = await UNUserNotificationCenter.current().notificationSettings()
+        let denied = s.authorizationStatus == .denied
+        instantly { systemDenied = denied }
     }
 }

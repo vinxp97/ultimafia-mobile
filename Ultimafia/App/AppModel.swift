@@ -7,6 +7,7 @@ final class AppModel {
         didSet {
             UMViewerPrefs.shared.apply(user: user)
             UMProfileCache.activeUserId.withLock { $0 = user?.id }
+            UMAppAttest.shared.userId = user?.id
         }
     }
     var isRestoring = true
@@ -206,6 +207,7 @@ final class AppModel {
         DeviceIdentity.recordSignIn(userId: id)
         startPresence()
         Task { await self.loadMyCustomMedia() }
+        UMAppAttest.shared.warmUp(userId: id)
         await refreshLobby()
         resumeIfSeated()
     }

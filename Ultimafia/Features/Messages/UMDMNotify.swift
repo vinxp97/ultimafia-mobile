@@ -79,18 +79,37 @@ enum UMDMNotify {
         }
     }
 
-    /// Foreground banners for DMs (outside the open thread); other app alerts keep their old rule.
+    /// Foreground banners. Remote pushes (they carry `aps`) show unless their type is switched off on
+    /// this device, they are DMs while in a game / in that thread, or game nudges while already in a
+    /// game. Local DM alerts keep their rule; other local alerts never show in the foreground.
     static func foregroundOptions(for n: UNNotification) -> UNNotificationPresentationOptions {
-        guard n.request.identifier.hasPrefix(prefix) || n.request.content.userInfo["dmChannel"] != nil else { return [] }
+        let info = n.request.content.userInfo
+        if info["aps"] != nil {
+            return MainActor.assumeIsolated {
+                if let t = UMPushType.forPayloadType(info["type"] as? String), !UMPushPrefs.shared.isOn(t) { return [] }
+                let inGame = UMChatStore.shared.inGame
+                switch UMDeepLink.from(payload: info) {
+                case .dm(let id)?:
+                    if inGame || UMChatStore.shared.currentChannelId == id { return [] }
+                case .game?:
+                    if inGame { return [] }
+                case .chat?:
+                    if inGame { return [] }
+                default: break
+                }
+                return [.banner, .sound, .list]
+            }
+        }
+        guard n.request.identifier.hasPrefix(prefix) || info["dmChannel"] != nil else { return [] }
         return MainActor.assumeIsolated { UMChatStore.shared.inGame } ? [] : (sound ? [.banner, .sound, .list] : [.banner, .list])
     }
 
-    /// Notification tap (local or remote): open that DM thread on the Messages tab.
+    /// Notification tap (local or remote): route by payload type / gameId / url / threadId through
+    /// the shell's existing navigation (game, DMs, chat, profile, leaderboard, or the in-app browser).
     @MainActor
     static func handleTap(_ userInfo: [AnyHashable: Any]) {
-        guard let id = userInfo["dmChannel"] as? String, !UMChatStore.shared.inGame else { return }
-        UMChatStore.shared.focusChannelId = id
-        NotificationCenter.default.post(name: .umOpenMessages, object: nil)
+        guard let link = UMDeepLink.from(payload: userInfo) else { return }
+        UMDeepLinkInbox.shared.post(link)
     }
 }
 
@@ -98,34 +117,37 @@ extension Notification.Name {
     static let umOpenMessages = Notification.Name("umOpenMessages")
 }
 
-/// APNs for closed-app DM alerts. Server: POST/DELETE /api/user/push/apns {token, environment, bundleId}
-/// (login required; the server skips pushes while the user is playing or spectating).
-/// Registers only when signed in AND DM alerts are on with notification permission granted.
+/// APNs registration for this device (PROPOSED contract §1c):
+/// POST /api/user/apnsToken { token, env: sandbox|production, bundleId, pushSettings } and
+/// DELETE /api/user/apnsToken { token }. Registers only when signed in, the device's master push
+/// switch is on and iOS permission is granted. A 404 (backend not deployed yet) is a quiet no-op.
 enum UMPush {
     static let isConfigured = UMFeatureFlags.pushNotificationsEnabled
-    static let registerPath = "user/push/apns"
     static let tokenKey = "um.apns.token"
-    static let bundleId = "VCCCLLC.Ultimafia"
-    #if DEBUG
-    static let environment = "development"
-    #else
-    static let environment = "production"
-    #endif
+    static var environment: UMPushEnvironment { .current }
 
+    /// Swappable for tests / previews.
+    @MainActor static var backend: UMPushBackend = UMLivePushBackend.shared
     /// Set by the signed-in shell; uploads wait for it.
     @MainActor static var signedIn = false
-    @MainActor private static var uploadedToken: String?
+    /// token + settings last accepted by the server, so unchanged state isn't re-posted.
+    @MainActor private static var uploadedKey: String?
+    @MainActor private(set) static var serverSupportsPush: Bool?
 
-    /// Call after login and after DM alerts are enabled.
+    static var savedToken: String? { UserDefaults.standard.string(forKey: tokenKey) }
+
+    /// After login, on enabling the master switch, and on every foreground: ask APNs for a token.
     @MainActor
     static func registerIfConfigured() {
-        guard isConfigured, signedIn, UMNotifyMaster.isOn, UMDMNotify.enabled else { return }
+        guard isConfigured, signedIn, UMPushPrefs.shared.master else { return }
         UNUserNotificationCenter.current().getNotificationSettings { s in
             guard s.authorizationStatus == .authorized || s.authorizationStatus == .provisional else { return }
             Task { @MainActor in
                 #if canImport(UIKit)
                 UIApplication.shared.registerForRemoteNotifications()
                 #endif
+                // Settings may have changed while the token stayed the same.
+                if let hex = savedToken { upload(hex) }
             }
         }
     }
@@ -133,39 +155,53 @@ enum UMPush {
     @MainActor
     static func didRegister(token: Data) {
         guard isConfigured else { return }
-        let hex = token.map { String(format: "%02x", $0) }.joined()
+        let hex = UMPushToken.hex(token)
         UserDefaults.standard.set(hex, forKey: tokenKey)
-        UMDiag.log("push", "apns token \(hex.prefix(8))… env \(environment)")
+        UMDiag.log("push", "apns token \(hex.prefix(8))… env \(environment.rawValue)")
         upload(hex)
+    }
+
+    /// Settings changed (You tab, iCloud, permission): re-post with the new pushSettings, or remove
+    /// this device from the account when the master switch is off.
+    @MainActor
+    static func sync() {
+        guard isConfigured, signedIn else { return }
+        if UMPushPrefs.shared.master { registerIfConfigured() } else { Task { await unregister() } }
     }
 
     @MainActor
     private static func upload(_ hex: String) {
-        guard isConfigured, signedIn, UMDMNotify.enabled, uploadedToken != hex else { return }
-        uploadedToken = hex
-        Task {
-            do {
-                try await APIClient.shared.postStatus(registerPath, json: body(hex))
+        let settings = UMPushPrefs.shared.settings
+        guard isConfigured, signedIn, settings.master else { return }
+        let key = hex + "|" + settings.serverPayload.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+        guard uploadedKey != key else { return }
+        uploadedKey = key
+        let body = UMPushRegistration.body(token: hex, env: environment, settings: settings)
+        Task { @MainActor in
+            switch await backend.registerToken(body) {
+            case .ok:
+                serverSupportsPush = true
                 UMDiag.log("push", "token registered")
-            } catch {
-                UMDiag.log("push", "token register failed: \(error.localizedDescription)")
-                await MainActor.run { uploadedToken = nil }
+            case .unsupported:
+                // Backend not deployed yet: keep the token, try again next launch / settings change.
+                serverSupportsPush = false
+                uploadedKey = nil
+                UMDiag.log("push", "apnsToken route missing (404); skipping")
+            case .failed(let why):
+                uploadedKey = nil
+                UMDiag.log("push", "token register failed: \(why)")
             }
         }
     }
 
-    private static func body(_ hex: String) -> [String: Any] {
-        ["token": hex, "environment": environment, "bundleId": bundleId]
-    }
-
-    /// Logout, account switch, or DM alerts turned off: remove this device from the current account.
-    /// Must run while the old session is still valid.
+    /// Logout, account switch, backend switch, or master off: remove this device from the current
+    /// account. Must run while the old session is still valid.
     @MainActor
     static func unregister() async {
-        guard isConfigured, let hex = UserDefaults.standard.string(forKey: tokenKey) else { return }
-        uploadedToken = nil
-        _ = try? await APIClient.shared.request("DELETE", path: registerPath, query: [:], body: body(hex))
-        UMDiag.log("push", "token unregistered")
+        guard isConfigured, let hex = savedToken else { return }
+        uploadedKey = nil
+        let r = await backend.deleteToken(hex)
+        UMDiag.log("push", "token unregister: \(r)")
     }
 
     /// The server checks game membership itself, so nothing to report.
@@ -201,9 +237,9 @@ enum UMNotifyMaster {
 
     nonisolated static var isOn: Bool { UserDefaults.standard.bool(forKey: key) }
 
+    /// The device's master push switch lives in UMPushPrefs (per device, iCloud); `key` is its mirror.
     @MainActor static func set(_ on: Bool) {
-        UserDefaults.standard.set(on, forKey: key)
-        if on { UMPush.registerIfConfigured() } else { Task { await UMPush.unregister() } }
+        UMPushPrefs.shared.setMaster(on)
     }
 
     @MainActor private static var observing = false
@@ -220,8 +256,10 @@ enum UMNotifyMaster {
         }
         if !UserDefaults.standard.bool(forKey: didAskKey) {
             UserDefaults.standard.set(true, forKey: didAskKey)
+            // First launch: the system prompt (Vinman). The answer sets this device's push settings,
+            // restoring them from iCloud after a reinstall.
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-                Task { @MainActor in set(granted) }
+                Task { @MainActor in UMPushPrefs.shared.applyPermissionResult(granted) }
             }
         } else {
             resync()
@@ -236,7 +274,9 @@ enum UMNotifyMaster {
             #else
             let allowed = [.authorized, .provisional, .ephemeral].contains(s.authorizationStatus)
             #endif
-            Task { @MainActor in if !allowed && isOn { set(false) } }
+            Task { @MainActor in
+                if !allowed { UMPushPrefs.shared.permissionRevoked() } else { UMPush.registerIfConfigured() }
+            }
         }
     }
 

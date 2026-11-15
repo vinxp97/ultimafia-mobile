@@ -253,6 +253,25 @@ final class APIClient {
         return []
     }
 
+    /// Like `request`, but hands back the HTTP status instead of throwing on 4xx/5xx, for endpoints
+    /// that may not exist yet (push / App Attest: a 404 means "backend not deployed", a quiet no-op).
+    func requestWithStatus(_ method: String, path: String, body: [String: Any]?) async throws -> (status: Int, data: Data) {
+        let url = try makeURL(path: path, query: [:])
+        var req = URLRequest(url: url)
+        UMAccess.apply(&req)
+        req.httpMethod = method
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("\(UMConfig.site)", forHTTPHeaderField: "Origin")
+        if let csrf, method != "GET" { req.setValue(csrf, forHTTPHeaderField: "x-csrf") }
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw UMError.message("No response.") }
+        return (http.statusCode, data)
+    }
+
     private func makeURL(path: String, query: [String: String]) throws -> URL {
         let base = UMConfig.apiBase.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let rel = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

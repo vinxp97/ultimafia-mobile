@@ -619,3 +619,17 @@ extension GamePlayer {
         umNameFill(UMViewerPrefs.shared.ignoreTextColor ? nil : textColorHex)
     }
 }
+
+/// Apple mark beside a player the server verified as playing from the iOS app (App Attest,
+/// `client == "ios"`). Same family as the kudos badge and ready-check marks.
+struct UMIOSClientBadge: View {
+    var size: CGFloat = 13
+
+    var body: some View {
+        Image(systemName: "apple.logo")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(UMTheme.muted)
+            .accessibilityLabel("Playing from the iOS app")
+            .help("Playing from the iOS app")
+    }
+}

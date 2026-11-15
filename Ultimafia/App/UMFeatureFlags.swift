@@ -1,9 +1,9 @@
 import Foundation
 
 nonisolated enum UMFeatureFlags {
-    /// APNs remote push for DMs. OFF for now: re-enable near release by flipping this to true AND
-    /// re-adding `aps-environment` (development) to Ultimafia/Ultimafia-iOS.entitlements.
-    /// While false the app never registers for remote notifications and never POSTs/DELETEs
-    /// /api/user/push/apns. Local in-app DM alerts are unaffected.
-    static let pushNotificationsEnabled = false
+    /// APNs remote push (game start, DMs, pings, friends/pokes). On: the app registers for remote
+    /// notifications when this device's master push switch is on, and POSTs/DELETEs
+    /// /api/user/apnsToken. Until Pranay's backend ships those routes answer 404, which the client
+    /// treats as a quiet no-op. Needs `aps-environment` in Ultimafia/Ultimafia-iOS.entitlements.
+    static let pushNotificationsEnabled = true
 }
