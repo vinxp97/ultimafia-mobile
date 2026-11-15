@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 /// Notification taps and universal links can arrive before the signed-in shell exists (cold
 /// launch from a banner). They wait here until MainTabs drains them.
@@ -36,9 +37,24 @@ extension AppModel {
             guard !inGame else { return }
             if let channelId { UMChatStore.shared.focusChannelId = channelId }
             section = .messages
-        case .profile(let id):
-            section = .play
-            path.append(.profile(id: id, name: ""))
+        case .profile(let idOrVanity):
+            // /user/:id accepts a vanity name; /api/user/:id/profile answers with the real id, so the
+            // pushed screen (and its cache, follow, DM actions) always use the canonical id.
+            Task { @MainActor in
+                var id = idOrVanity, name = ""
+                if let r = try? await APIClient.shared.requestWithStatus("GET", path: "user/\(idOrVanity)/profile", body: nil),
+                   r.status == 200,
+                   let o = try? JSONSerialization.jsonObject(with: r.data) as? [String: Any] {
+                    if let real = o["id"] as? String, !real.isEmpty { id = real }
+                    name = (o["name"] as? String) ?? ""
+                }
+                var t = Transaction(animation: nil)
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    self.section = .play
+                    self.path.append(.profile(id: id, name: name))
+                }
+            }
         case .leaderboard:
             select(.leaderboard)
         case .play:

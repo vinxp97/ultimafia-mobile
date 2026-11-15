@@ -22,7 +22,7 @@ struct PushAttestTests {
         attestWire()
         outcomes()
         if failures == 0 {
-            print("PushAttestTests passed: token hex/env, settings model, per-device store, registration body, payload routing, universal links, client field, attest wire, 404 no-op")
+            print("PushAttestTests passed: token hex/env, settings model, per-device store, registration body, payload routing, universal links, client field, attest wire, 404/409/429, inbox badge")
         } else {
             print("PushAttestTests: \(failures) failure(s)")
             exit(1)
@@ -66,6 +66,7 @@ struct PushAttestTests {
         equal(UMPushType.forPayloadType("forumQuote"), .pings, "forumQuote -> pings")
         equal(UMPushType.forPayloadType("poke"), .pokes, "poke -> pokes")
         equal(UMPushType.forPayloadType("friendRequest"), .friends, "friendRequest -> friends")
+        equal(UMPushType.forPayloadType("pokeBack"), nil, "poke-back is the poke type")
         equal(UMPushType.forPayloadType("moderation"), nil, "moderation has no switch")
     }
 
@@ -94,7 +95,14 @@ struct PushAttestTests {
         equal(body["token"] as? String, "abcd", "token")
         equal(body["env"] as? String, "sandbox", "env")
         equal(body["bundleId"] as? String, "VCCCLLC.Ultimafia", "bundleId")
-        equal((body["pushSettings"] as? [String: Bool])?["pings"], false, "pushSettings rides along")
+        equal((body["settings"] as? [String: Bool])?["pings"], false, "settings rides along (final contract key)")
+        check(body["pushSettings"] == nil, "no stale pushSettings key")
+        equal(UMPushRegistration.logoutBody(token: "abcd") as? [String: String], ["apnsToken": "abcd"], "logout carries apnsToken")
+        check(UMPushRegistration.logoutBody(token: nil).isEmpty, "logout without a token sends {}")
+        check(UMPushRegistration.debounceSeconds >= 1.0, "debounce respects the 1/s limit")
+        let echoed = UMPushRegistration.parseSettings(["ok": true, "settings": ["dms": false]])
+        equal(echoed?["dms"], false, "echoed settings parsed")
+        equal(echoed?["pokes"], true, "echoed missing field defaults true")
         equal(UMPushRegistration.path, "user/apnsToken", "route under /api")
         equal(UMPushRegistration.deleteBody(token: "abcd") as? [String: String], ["token": "abcd"], "delete body")
     }
@@ -111,7 +119,16 @@ struct PushAttestTests {
         equal(UMDeepLink.from(payload: ["type": "forumReply", "url": "/community/forums/thread/t1?reply=r2"]),
               .web("/community/forums/thread/t1?reply=r2"), "forum -> in-app browser")
         equal(UMDeepLink.from(payload: ["aps": ["alert": "x"]]), nil, "no route info")
-        equal(UMDeepLink.from(payload: ["type": "gameScheduled", "gameId": NSNumber(value: 5)]), .game("5"), "numeric id tolerated")
+        equal(UMDeepLink.from(payload: ["type": "gameReady", "gameId": NSNumber(value: 5)]), .game("5"), "numeric id tolerated")
+        equal(UMDeepLink.from(payload: ["type": "forumMention", "threadId": "t1", "url": "/community/forums/thread/t1"]),
+              .web("/community/forums/thread/t1"), "forum mention -> in-app browser")
+        equal(UMDeepLink.from(payload: ["type": "friendRequest", "url": "/user/vanityName"]), .profile("vanityName"), "friend accepted (same type)")
+        // The 9 contract types and their settings.
+        let map: [String: UMPushType] = ["gameReady": .gameStart, "gameStarting": .gameStart, "dm": .dms, "chatPing": .pings,
+                                         "forumMention": .pings, "forumReply": .pings, "forumQuote": .pings,
+                                         "friendRequest": .friends, "poke": .pokes]
+        for (type, setting) in map { equal(UMPushType.forPayloadType(type), setting, "\(type) -> \(setting)") }
+        equal(UMPushType.forPayloadType("gameScheduled"), nil, "not a v1 type")
     }
 
     static func universalLinks() {
@@ -155,6 +172,11 @@ struct PushAttestTests {
         let j = UMAttestWire.joinField(keyId: "k", assertion: Data([1, 2, 3]))
         equal(j["keyId"] as? String, "k", "join keyId")
         equal(j["assertion"] as? String, "AQID", "join assertion base64")
+        check(j["challenge"] == nil, "socket challenge: no challenge echo")
+        let jh = UMAttestWire.joinField(keyId: "k", assertion: Data([1]), httpChallenge: "hc")
+        equal(jh["challenge"] as? String, "hc", "HTTP fallback echoes its challenge")
+        equal(UMAttestWire.devBypassField["devBypass"] as? Bool, true, "simulator devBypass")
+        equal(UMAttestWire.parseChallenge(["challenge": "c", "ttlSec": 120, "socketNonce": "n"])?.socketNonce, "n", "socketNonce key")
         let a = UMAttestWire.attestBody(keyId: "k", attestation: Data([0xff]), challenge: "c")
         equal(a["attestationObject"] as? String, "/w==", "attestation base64")
         equal(a["challenge"] as? String, "c", "attest challenge echoed")
@@ -166,5 +188,12 @@ struct PushAttestTests {
         equal(UMBackendOutcome.from(status: 404), .unsupported, "404 -> quiet no-op")
         equal(UMBackendOutcome.from(status: 501), .unsupported, "501 -> no-op")
         equal(UMBackendOutcome.from(status: 500), .failed("HTTP 500"), "500 failed")
+        equal(UMBackendOutcome.from(status: 429), .rateLimited, "429 -> retry once")
+        equal(UMBackendOutcome.from(status: 409), .conflict, "409 -> fresh key")
+        equal(UMBackendOutcome.from(status: 400), .failed("HTTP 400"), "400 failed")
+        equal(UMInboxCount.parse(NSNumber(value: 3)), 3, "badge: number")
+        equal(UMInboxCount.parse("4"), 4, "badge: string")
+        equal(UMInboxCount.parse(["count": 2]), 2, "badge: {count}")
+        equal(UMInboxCount.parse(["x": 1]), nil, "badge: unknown shape")
     }
 }

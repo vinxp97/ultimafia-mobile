@@ -369,10 +369,11 @@ final class AppModel {
         let email = id.flatMap { uid in AccountStore.shared.accounts.first { $0.id == uid }?.email }
         if seatedGameId != nil { game?.leave() }
         stopPresence()
-        await UMPush.unregister()
+        let apnsToken = UMPush.logoutToken()
         UMPush.signedIn = false
         UMChatStore.shared.stop()
-        await APIClient.shared.logout()
+        await APIClient.shared.logout(apnsToken: apnsToken)
+        UMInboxBadge.clear()
         if let id {
             AccountStore.shared.clearSession(id)
             AccountStore.shared.clearPassword(id)

@@ -1,9 +1,10 @@
 import Foundation
+import UserNotifications
 
 /// Push + App Attest server calls, behind a protocol so the app runs (and tests run) before the
-/// backend exists. Shapes are the PROPOSED ones in Pranay's contract.
+/// backend is deployed. Shapes: docs/ios-push-appattest.md (Gitea PR #92).
 protocol UMPushBackend: AnyObject {
-    /// POST /api/user/apnsToken { token, env, bundleId, pushSettings }.
+    /// POST /api/user/apnsToken { token, env, bundleId, settings }.
     func registerToken(_ body: [String: Any]) async -> UMBackendOutcome
     /// DELETE /api/user/apnsToken { token }.
     func deleteToken(_ token: String) async -> UMBackendOutcome
@@ -41,5 +42,27 @@ final class UMLivePushBackend: UMPushBackend {
 
     func attest(_ body: [String: Any]) async -> UMBackendOutcome {
         await call("POST", UMAttestWire.attestPath, body).0
+    }
+}
+
+/// App icon badge. Pushes set it to the site inbox unread count (`aps.badge`); the app re-reads
+/// that count on foreground so reading the inbox on the site clears it here too, and zeroes it on
+/// sign-out. The app has no native inbox screen yet.
+@MainActor
+enum UMInboxBadge {
+    static func refresh() {
+        guard UMPush.isConfigured, UMPush.signedIn else { return }
+        Task { @MainActor in
+            guard let r = try? await APIClient.shared.requestWithStatus("GET", path: UMInboxCount.path, body: nil),
+                  r.status == 200 else { return }
+            let obj = (try? JSONSerialization.jsonObject(with: r.data, options: [.fragmentsAllowed]))
+                ?? String(data: r.data, encoding: .utf8)
+            guard let n = UMInboxCount.parse(obj) else { return }
+            try? await UNUserNotificationCenter.current().setBadgeCount(n)
+        }
+    }
+
+    static func clear() {
+        Task { try? await UNUserNotificationCenter.current().setBadgeCount(0) }
     }
 }

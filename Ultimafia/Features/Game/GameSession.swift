@@ -27,7 +27,7 @@ struct GamePlayer: Identifiable, Hashable {
     var playerListPosition: Double? = nil
     var customEmotes: [String: String] = [:]
     var customStickers: [String: String] = [:]
-    /// Optional `client` from getPlayerInfo (PROPOSED): "ios" when the server verified App Attest.
+    /// Optional `client` from players / playerJoin: "ios" when the server verified App Attest.
     var client: String? = nil
 }
 
@@ -412,7 +412,7 @@ final class GameSession {
     private let socket = GameSocket()
     private var token: String?
     private var didJoin = false
-    /// App Attest: a socket-pushed `appAttestChallenge` (PROPOSED), and a join waiting on the assertion.
+    /// App Attest: a socket-pushed `appAttestChallenge` (sent just before authSuccess), and a join waiting on the assertion.
     private var attestPushed: (challenge: String, socketNonce: String?)?
     private var attestPending = false
     private var leftByServer = false
@@ -1547,7 +1547,7 @@ final class GameSession {
         case "appAttestChallenge":
             attestPushed = UMAttestWire.parseChallenge(data)
         case "playerClient":
-            // PROPOSED: a seated player attested after joining; { playerId, client }.
+            // A seated player reconnected from the other client: { playerId, client: "ios" | null }.
             if let o = data as? [String: Any], let id = (o["playerId"] as? String) ?? (o["id"] as? String) {
                 let client = UMPlayerClient.parse(o)
                 if let i = players.firstIndex(where: { $0.id == id }) { players[i].client = client }
@@ -1760,7 +1760,12 @@ final class GameSession {
     /// backend, an error, or 3 seconds without an answer all just join without it.
     private func joinWithAttest() {
         guard !didJoin, !attestPending else { return }
-        guard UMAppAttest.shared.isSupported, let userId = UMAppAttest.shared.userId else { return join() }
+        #if targetEnvironment(simulator) && DEBUG
+        let canAttest = true          // devBypass
+        #else
+        let canAttest = UMAppAttest.shared.isSupported
+        #endif
+        guard canAttest, let userId = UMAppAttest.shared.userId else { return join() }
         attestPending = true
         let pushed = attestPushed
         Task { @MainActor [weak self] in

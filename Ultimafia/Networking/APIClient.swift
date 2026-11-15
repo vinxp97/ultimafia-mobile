@@ -106,8 +106,9 @@ final class APIClient {
         return info
     }
 
-    func logout() async {
-        try? await postStatus("user/logout")
+    /// `apnsToken`: this device's push token, deleted by the server with the session.
+    func logout(apnsToken: String? = nil) async {
+        try? await postStatus("user/logout", json: UMPushRegistration.logoutBody(token: apnsToken))
         csrf = nil
         if let cookies = HTTPCookieStorage.shared.cookies {
             for cookie in cookies {

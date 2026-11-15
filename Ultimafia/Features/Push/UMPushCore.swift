@@ -2,7 +2,7 @@ import Foundation
 
 // Pure push / deep-link / App Attest helpers (Foundation only, so Tests/PushAttestTests.swift can
 // compile this file on its own). Server shapes follow Pranay's APNs + App Attest design contract;
-// everything marked PROPOSED there is still PROPOSED here until his backend lands.
+// final shapes are docs/ios-push-appattest.md on pranay/ios-push-appattest (Gitea PR #92).
 
 /// APNs host the token belongs to. A sandbox token sent to production fails with BadDeviceToken,
 /// so the server needs this with every registration.
@@ -33,7 +33,7 @@ nonisolated enum UMPushToken {
     }
 }
 
-/// The per-type switches. Raw values are Pranay's planned `pushSettings` keys.
+/// The per-type switches. Raw values are the contract `settings` keys.
 nonisolated enum UMPushType: String, CaseIterable, Codable, Sendable {
     case gameStart, dms, pings, friends, pokes
 
@@ -60,11 +60,13 @@ nonisolated enum UMPushType: String, CaseIterable, Codable, Sendable {
     /// Which switch an incoming payload `type` belongs to (contract §1d suggested values).
     static func forPayloadType(_ type: String?) -> UMPushType? {
         switch type {
-        case "gameReady", "gameStarting", "gameScheduled", "gameStart": .gameStart
+        // The 9 types in docs/ios-push-appattest.md. friendRequest also covers "accepted";
+        // poke covers poke-back.
+        case "gameReady", "gameStarting": .gameStart
         case "dm": .dms
-        case "chatPing", "forumMention", "forumReply", "forumQuote", "ping": .pings
-        case "friendRequest", "friendAccepted", "friend": .friends
-        case "poke", "pokeBack": .pokes
+        case "chatPing", "forumMention", "forumReply", "forumQuote": .pings
+        case "friendRequest": .friends
+        case "poke": .pokes
         default: nil
         }
     }
@@ -88,7 +90,7 @@ nonisolated struct UMPushSettings: Codable, Equatable, Sendable {
 
     mutating func set(_ t: UMPushType, _ on: Bool) { types[t] = on }
 
-    /// `pushSettings` as the server would read it: every key present, all true by default.
+    /// `settings` as the server reads it: every key present, all true by default.
     var serverPayload: [String: Bool] {
         Dictionary(uniqueKeysWithValues: UMPushType.allCases.map { ($0.rawValue, types[$0] ?? true) })
     }
@@ -174,14 +176,31 @@ nonisolated final class UMPushSettingsStore {
     }
 }
 
-/// POST /api/user/apnsToken body (PROPOSED). `pushSettings` rides along so the server can filter
-/// per device. TODO(Pranay): confirm settings belong on this route vs a separate /api/user/pushSettings.
+/// POST /api/user/apnsToken body (docs/ios-push-appattest.md): `settings` is per device; the
+/// server answers {ok, settings}. Limited to 1 request per second per user, so callers debounce.
 nonisolated enum UMPushRegistration {
     static let path = "user/apnsToken"
     static let bundleId = "VCCCLLC.Ultimafia"
 
     static func body(token: String, env: UMPushEnvironment, settings: UMPushSettings) -> [String: Any] {
-        ["token": token, "env": env.rawValue, "bundleId": bundleId, "pushSettings": settings.serverPayload]
+        ["token": token, "env": env.rawValue, "bundleId": bundleId, "settings": settings.serverPayload]
+    }
+
+    /// Wait after the last toggle before posting, and before the one retry after a 429.
+    static let debounceSeconds = 1.2
+
+    /// POST /api/user/logout body: the token rides along so the server drops it with the session.
+    static func logoutBody(token: String?) -> [String: Any] {
+        guard let token, !token.isEmpty else { return [:] }
+        return ["apnsToken": token]
+    }
+
+    /// `settings` echoed in the 200 response (missing fields default to true).
+    static func parseSettings(_ obj: Any?) -> [String: Bool]? {
+        guard let o = obj as? [String: Any], let s = o["settings"] as? [String: Any] else { return nil }
+        var out: [String: Bool] = [:]
+        for t in UMPushType.allCases { out[t.rawValue] = (s[t.rawValue] as? Bool) ?? true }
+        return out
     }
 
     static func deleteBody(token: String) -> [String: Any] { ["token": token] }
@@ -212,12 +231,12 @@ nonisolated enum UMDeepLink: Equatable, Sendable {
         if let ch = str("dmChannel") { return .dm(ch) }
         let type = str("type")
         switch type {
-        case "gameReady", "gameStarting", "gameScheduled", "gameStart":
+        case "gameReady", "gameStarting":
             if let g = str("gameId") { return .game(g) }
         case "dm":
             if let ch = str("channelId") ?? str("threadId") { return .dm(ch) }
         case "chatPing":
-            return .chat(str("channelId") ?? str("threadId"))
+            return .chat(str("channelId"))
         default:
             break
         }
@@ -269,7 +288,7 @@ nonisolated enum UMDeepLink: Equatable, Sendable {
     }
 }
 
-/// Optional `client` field on getPlayerInfo (PROPOSED). Only "ios" draws the Apple icon; any
+/// Optional `client` field on players / playerJoin (never sent in anonymous games). Only "ios" draws the Apple icon; any
 /// other value (or none) is ignored so web players look exactly as before.
 nonisolated enum UMPlayerClient {
     static func parse(_ obj: [String: Any]) -> String? {
@@ -288,9 +307,8 @@ nonisolated enum UMAttestWire {
     static let challengePath = "appattest/challenge"
     static let attestPath = "appattest/attest"
 
-    /// Per-socket clientData: challenge bytes followed by the socket nonce bytes (UTF-8), so a
-    /// captured assertion can't authorize another connection. The app then signs SHA256(clientData).
-    /// TODO(Pranay): confirm the exact concatenation and where the socket nonce comes from.
+    /// Per-socket clientData: UTF-8(challenge) + UTF-8(socketNonce), no base64 decode (contract).
+    /// The app signs SHA256(clientData).
     static func clientData(challenge: String, socketNonce: String?) -> Data {
         var d = Data(challenge.utf8)
         if let socketNonce { d.append(Data(socketNonce.utf8)) }
@@ -309,24 +327,53 @@ nonisolated enum UMAttestWire {
         ["keyId": keyId, "attestationObject": attestation.base64EncodedString(), "challenge": challenge]
     }
 
-    static func joinField(keyId: String, assertion: Data) -> [String: Any] {
-        ["keyId": keyId, "assertion": assertion.base64EncodedString()]
+    /// `appAttest` on `join`. `httpChallenge` is set only when the socket's challenge was missed
+    /// and one came from GET /api/appattest/challenge instead.
+    static func joinField(keyId: String, assertion: Data, httpChallenge: String? = nil) -> [String: Any] {
+        var f: [String: Any] = ["keyId": keyId, "assertion": assertion.base64EncodedString()]
+        if let httpChallenge { f["challenge"] = httpChallenge }
+        return f
     }
+
+    /// Simulator only, DEBUG builds only; the server honors it only with APP_ATTEST_DEV_BYPASS=1
+    /// outside production.
+    static let devBypassField: [String: Any] = ["devBypass": true]
 }
 
 /// Result of a call to an endpoint Pranay hasn't shipped yet.
 nonisolated enum UMBackendOutcome: Equatable {
     case ok
-    /// 404 / 501: the route doesn't exist on this server yet. Callers treat this as a quiet no-op.
+    /// 404 / 501: the route doesn't exist on this server. Callers treat this as a quiet no-op.
     case unsupported
+    /// 429: more than one apnsToken call a second.
+    case rateLimited
+    /// 409 from attest: the keyId is enrolled by another account; make a new key.
+    case conflict
     case failed(String)
 
     static func from(status: Int) -> UMBackendOutcome {
         switch status {
         case 200..<300: .ok
         case 404, 405, 501: .unsupported
+        case 429: .rateLimited
+        case 409: .conflict
         default: .failed("HTTP \(status)")
         }
     }
 }
 
+
+/// GET /api/notifs/unreadCount, the same number the server puts in `aps.badge`.
+nonisolated enum UMInboxCount {
+    static let path = "notifs/unreadCount"
+
+    /// Tolerant: a bare number, a numeric string, or { count | unreadCount | unread }.
+    static func parse(_ any: Any?) -> Int? {
+        if let n = any as? NSNumber { return max(0, n.intValue) }
+        if let s = any as? String, let n = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) { return max(0, n) }
+        if let o = any as? [String: Any] {
+            for k in ["count", "unreadCount", "unread"] { if let n = parse(o[k]) { return n } }
+        }
+        return nil
+    }
+}

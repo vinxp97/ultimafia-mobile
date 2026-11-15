@@ -117,10 +117,12 @@ extension Notification.Name {
     static let umOpenMessages = Notification.Name("umOpenMessages")
 }
 
-/// APNs registration for this device (PROPOSED contract §1c):
-/// POST /api/user/apnsToken { token, env: sandbox|production, bundleId, pushSettings } and
-/// DELETE /api/user/apnsToken { token }. Registers only when signed in, the device's master push
-/// switch is on and iOS permission is granted. A 404 (backend not deployed yet) is a quiet no-op.
+/// APNs registration for this device (docs/ios-push-appattest.md on pranay/ios-push-appattest):
+/// POST /api/user/apnsToken { token, env: sandbox|production, bundleId, settings } -> {ok, settings};
+/// DELETE /api/user/apnsToken { token } when push is turned off; logout sends { apnsToken }.
+/// The route allows 1 call a second, so posts are debounced 1.2 s and retried once on 429.
+/// Registers only when signed in, the device's master push switch is on and iOS permission is
+/// granted. A 404 (server without the routes) is a quiet no-op.
 enum UMPush {
     static let isConfigured = UMFeatureFlags.pushNotificationsEnabled
     static let tokenKey = "um.apns.token"
@@ -132,6 +134,7 @@ enum UMPush {
     @MainActor static var signedIn = false
     /// token + settings last accepted by the server, so unchanged state isn't re-posted.
     @MainActor private static var uploadedKey: String?
+    @MainActor private static var pendingUpload: Task<Void, Never>?
     @MainActor private(set) static var serverSupportsPush: Bool?
 
     static var savedToken: String? { UserDefaults.standard.string(forKey: tokenKey) }
@@ -161,47 +164,81 @@ enum UMPush {
         upload(hex)
     }
 
-    /// Settings changed (You tab, iCloud, permission): re-post with the new pushSettings, or remove
+    /// Settings changed (You tab, iCloud, permission): re-post with the new settings, or remove
     /// this device from the account when the master switch is off.
     @MainActor
     static func sync() {
         guard isConfigured, signedIn else { return }
-        if UMPushPrefs.shared.master { registerIfConfigured() } else { Task { await unregister() } }
-    }
-
-    @MainActor
-    private static func upload(_ hex: String) {
-        let settings = UMPushPrefs.shared.settings
-        guard isConfigured, signedIn, settings.master else { return }
-        let key = hex + "|" + settings.serverPayload.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
-        guard uploadedKey != key else { return }
-        uploadedKey = key
-        let body = UMPushRegistration.body(token: hex, env: environment, settings: settings)
-        Task { @MainActor in
-            switch await backend.registerToken(body) {
-            case .ok:
-                serverSupportsPush = true
-                UMDiag.log("push", "token registered")
-            case .unsupported:
-                // Backend not deployed yet: keep the token, try again next launch / settings change.
-                serverSupportsPush = false
-                uploadedKey = nil
-                UMDiag.log("push", "apnsToken route missing (404); skipping")
-            case .failed(let why):
-                uploadedKey = nil
-                UMDiag.log("push", "token register failed: \(why)")
-            }
+        if UMPushPrefs.shared.master { registerIfConfigured() } else {
+            pendingUpload?.cancel()
+            Task { await unregister() }
         }
     }
 
-    /// Logout, account switch, backend switch, or master off: remove this device from the current
-    /// account. Must run while the old session is still valid.
+    private static func key(_ hex: String, _ settings: UMPushSettings) -> String {
+        hex + "|" + settings.serverPayload.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+    }
+
+    /// Debounced: rapid toggles collapse into one POST of the latest settings.
+    @MainActor
+    private static func upload(_ hex: String) {
+        guard isConfigured, signedIn, UMPushPrefs.shared.master,
+              uploadedKey != key(hex, UMPushPrefs.shared.settings) else { return }
+        pendingUpload?.cancel()
+        pendingUpload = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(UMPushRegistration.debounceSeconds))
+            guard !Task.isCancelled else { return }
+            await post(hex)
+        }
+    }
+
+    @MainActor
+    private static func post(_ hex: String) async {
+        let settings = UMPushPrefs.shared.settings
+        guard signedIn, settings.master else { return }
+        let k = key(hex, settings)
+        guard uploadedKey != k else { return }
+        let body = UMPushRegistration.body(token: hex, env: environment, settings: settings)
+        var outcome = await backend.registerToken(body)
+        if outcome == .rateLimited {
+            try? await Task.sleep(for: .seconds(UMPushRegistration.debounceSeconds))
+            guard !Task.isCancelled else { return }
+            outcome = await backend.registerToken(body)
+        }
+        switch outcome {
+        case .ok:
+            serverSupportsPush = true
+            uploadedKey = k
+            UMDiag.log("push", "token registered")
+        case .unsupported:
+            serverSupportsPush = false
+            UMDiag.log("push", "apnsToken route missing (404); skipping")
+        default:
+            UMDiag.log("push", "token register failed: \(outcome)")
+        }
+    }
+
+    /// Account switch, backend switch, or master off: remove this device from the current
+    /// account. Must run while the old session is still valid. (Sign-out uses `logoutToken`.)
     @MainActor
     static func unregister() async {
+        pendingUpload?.cancel()
         guard isConfigured, let hex = savedToken else { return }
         uploadedKey = nil
-        let r = await backend.deleteToken(hex)
+        var r = await backend.deleteToken(hex)
+        if r == .rateLimited {
+            try? await Task.sleep(for: .seconds(UMPushRegistration.debounceSeconds))
+            r = await backend.deleteToken(hex)
+        }
         UMDiag.log("push", "token unregister: \(r)")
+    }
+
+    /// Sign-out: the token rides on POST /api/user/logout { apnsToken } instead of a DELETE.
+    @MainActor
+    static func logoutToken() -> String? {
+        pendingUpload?.cancel()
+        uploadedKey = nil
+        return isConfigured ? savedToken : nil
     }
 
     /// The server checks game membership itself, so nothing to report.
@@ -276,6 +313,7 @@ enum UMNotifyMaster {
             #endif
             Task { @MainActor in
                 if !allowed { UMPushPrefs.shared.permissionRevoked() } else { UMPush.registerIfConfigured() }
+                UMInboxBadge.refresh()
             }
         }
     }

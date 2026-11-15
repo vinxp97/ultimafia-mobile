@@ -131,6 +131,7 @@ struct MainTabs: View {
                 UMChatStore.shared.start(selfId: app.user?.id)
                 UMPush.signedIn = true
                 UMPush.registerIfConfigured()
+                UMInboxBadge.refresh()
             }
             .onChange(of: inGame) { _, now in
                 UMChatStore.shared.inGame = now
