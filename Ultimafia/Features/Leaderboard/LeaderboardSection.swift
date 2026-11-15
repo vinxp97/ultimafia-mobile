@@ -27,7 +27,8 @@ struct LeaderboardSectionView: View {
 /// `-UMDiagLeaderboard <mode>`: the Leaderboard section inside the real tab bar.
 /// Sample data (offline): `skill`, `competitive` (hero round), `competitive-past` (previous
 /// rounds, first expanded), `competitive-standings` (Round standings), `competitive-season` (Season standings), `competitive-expired`
-/// (an older season whose games are gone). Prefix `live-` (e.g. `live-competitive`) to read the
+/// (an older season whose games are gone), `competitive-past-tap` (toggles
+/// the first previous round after 5 s, for checking it doesn't animate). Append `@N` for season N. Prefix `live-` (e.g. `live-competitive`) to read the
 /// real public endpoints instead.
 struct UMDiagLeaderboardView: View {
     var mode: String
@@ -38,14 +39,20 @@ struct UMDiagLeaderboardView: View {
         service = mode.hasPrefix("live-") ? UMLiveLeaderboardService(meId: nil) : UMMockLeaderboardService()
     }
 
-    private var base: String { mode.hasPrefix("live-") ? String(mode.dropFirst(5)) : mode }
+    /// `<mode>@<season>` picks a season, e.g. `live-competitive@10`.
+    private var base: String {
+        let m = mode.split(separator: "@").first.map(String.init) ?? mode
+        return m.hasPrefix("live-") ? String(m.dropFirst(5)) : m
+    }
+    private var seasonArg: Int? { mode.split(separator: "@").dropFirst().first.flatMap { Int($0) } }
     private var tab: UMLeaderboardTab { base.hasPrefix("competitive") ? .competitive : .skill }
-    private var season: Int? { base == "competitive-expired" && !mode.hasPrefix("live-") ? 2 : nil }
+    private var season: Int? { seasonArg ?? (base == "competitive-expired" && !mode.hasPrefix("live-") ? 2 : nil) }
     private var anchor: String? {
         switch base {
         case "competitive-past": "past"
         case "competitive-season": "season"
         case "competitive-standings": "standings"
+        case "competitive-past-tap": "past-tap"
         case "competitive-seasons": "seasons"
         default: nil
         }

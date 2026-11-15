@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 
 /// Competitive tab: Seasons and Rounds.
 /// - The season's most recent round is the hero, with everything the API still has.
@@ -12,6 +11,8 @@ struct CompetitiveBoard: View {
     var expandFirstPast = false
     /// DEBUG screenshots: open the standings on the Season toggle.
     var startOnSeason = false
+    /// DEBUG screenshots: toggle the first previous round 5 s after load, the same way a tap does.
+    var diagTapPast = false
     var onOpenProfile: ((String, String) -> Void)?
     var onLoaded: () -> Void = {}
     @Environment(\.horizontalSizeClass) private var hSize
@@ -97,7 +98,7 @@ struct CompetitiveBoard: View {
             // Hero first so it paints while earlier rounds load.
             for ref in started.map(\.ref).reversed() where rounds[ref] == nil {
                 if let d = try? await service.round(ref) {
-                    withAnimation(.snappy) { rounds[ref] = d }
+                    rounds[ref] = d
                 }
             }
             if expandFirstPast, let first = pastRefs.first { expanded.insert(first) }
@@ -105,7 +106,13 @@ struct CompetitiveBoard: View {
         } catch {
             self.error = UMFriendlyError.message(for: error)
         }
-        if !didSignalLoaded { didSignalLoaded = true; onLoaded() }
+        if !didSignalLoaded {
+            didSignalLoaded = true
+            onLoaded()
+            if diagTapPast, let first = pastRefs.first {
+                Task { try? await Task.sleep(for: .seconds(5)); togglePast(first) }
+            }
+        }
         // Champions for the All Seasons list, lazily.
         for s in seasons where allSeasonTop[s.number] == nil {
             if let rows = try? await service.seasonStandings(s.number) { allSeasonTop[s.number] = rows }
@@ -126,7 +133,7 @@ struct CompetitiveBoard: View {
             HStack(spacing: 10) {
                 Menu {
                     ForEach(seasons) { s in
-                        Button { seasonNo = s.number } label: {
+                        Button { withTransaction(Transaction(animation: nil)) { seasonNo = s.number } } label: {
                             Text("Season \(s.number) · \(seasonState(s))")
                         }
                     }
@@ -193,7 +200,7 @@ struct CompetitiveBoard: View {
                 Image(systemName: "clock.badge.xmark").font(.title3).foregroundStyle(UMTheme.muted)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Round \(round) games expired").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                    Text("Games are deleted after 30 days, so this round's scores can't be rebuilt. Switch the standings to Season for where everyone finished.")
+                    Text("Games are deleted after 30 days, so this round's scores can't be rebuilt. The season standings below show where everyone finished.")
                         .font(.caption).foregroundStyle(UMTheme.muted)
                 }
             }
@@ -245,13 +252,20 @@ struct CompetitiveBoard: View {
         }
     }
 
+    /// No animation: expanding must not slide content, or the tapped card looks like it moved.
+    private func togglePast(_ ref: UMRoundRef) {
+        withTransaction(Transaction(animation: nil)) {
+            if expanded.contains(ref) { expanded.remove(ref) } else { expanded.insert(ref) }
+        }
+    }
+
     private func pastCard(_ ref: UMRoundRef) -> some View {
         let d = rounds[ref]
         let summary = season?.rounds.first { $0.ref == ref }
         let isOpen = expanded.contains(ref)
         return VStack(alignment: .leading, spacing: 10) {
             Button {
-                withAnimation(.snappy) { if isOpen { expanded.remove(ref) } else { expanded.insert(ref) } }
+                togglePast(ref)
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -270,6 +284,7 @@ struct CompetitiveBoard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .allowsHitTesting(UMCompetitive.hasRoundStandings(d))
             if let d {
                 if d.standings.isEmpty {
                     HStack(spacing: 6) {
@@ -281,7 +296,7 @@ struct CompetitiveBoard: View {
                     podiumRow(UMCompetitive.podium(d.standings).map { place in
                         (place.ranking, place.entries.map { ($0.player, "\($0.fortune.formatted())") })
                     })
-                    if isOpen {
+                    if isOpen && UMCompetitive.hasRoundStandings(d) {
                         ForEach(d.standings.prefix(10)) { s in standingRow(s) }
                         if let games = d.games {
                             Text("\(games.count) games · \(d.standings.count) players")
@@ -350,21 +365,33 @@ struct CompetitiveBoard: View {
         let roundNo = heroRef?.number ?? 0
         sectionTitle("Standings").id("standings")
         UMLeaderboardCard(title: standingsSubtitle) {
-            Picker("Standings", selection: $scope) {
-                Text("Round \(roundNo)").tag(StandingsScope.round)
-                Text("Season \(n)").tag(StandingsScope.season)
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: scope) { _, _ in showAllStandings = false }
-            switch scope {
-            case .round: roundStandings
-            case .season: seasonStandings
+            if hero == nil && heroRef != nil {
+                ProgressView().tint(UMTheme.blood).frame(maxWidth: .infinity)
+            } else {
+                // A round with no game data (expired) has no Round option at all: Season only.
+                if hasRoundData {
+                    Picker("Standings", selection: $scope) {
+                        Text("Season \(n)").tag(StandingsScope.season)
+                        Text("Round \(roundNo)").tag(StandingsScope.round)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: scope) { _, _ in showAllStandings = false }
+                }
+                switch effectiveScope {
+                case .round: roundStandings
+                case .season: seasonStandings
+                }
             }
         }
+        .transaction { $0.animation = nil }
     }
 
+    /// The hero round still has its games (and so a trustworthy round table).
+    private var hasRoundData: Bool { UMCompetitive.hasRoundStandings(hero) }
+    private var effectiveScope: StandingsScope { hasRoundData ? scope : .season }
+
     private var standingsSubtitle: String {
-        switch scope {
+        switch effectiveScope {
         case .round:
             guard let hero else { return "Round" }
             let state = (hero.round.phase == .grace || hero.round.phase == .review) ? "Awaiting results · \(hero.round.phase.label)"
@@ -375,26 +402,12 @@ struct CompetitiveBoard: View {
         }
     }
 
-    private func barChart(_ bars: [(String, Int)], label: String, color: Color) -> some View {
-        Chart(Array(bars.enumerated()), id: \.offset) { _, bar in
-            BarMark(x: .value(label, bar.1), y: .value("Player", bar.0), height: .ratio(0.7))
-                .foregroundStyle(color)
-                .cornerRadius(2)
-        }
-        .chartYAxis { AxisMarks { _ in AxisValueLabel().foregroundStyle(.white) } }
-        .chartXAxis { AxisMarks { _ in AxisGridLine().foregroundStyle(UMTheme.line); AxisValueLabel() } }
-        .frame(height: CGFloat(bars.count) * 24 + 24)
-        .animation(.snappy, value: scope)
-    }
-
     @ViewBuilder
     private var roundStandings: some View {
         if let hero, !hero.standings.isEmpty {
             let projected = !hero.round.accounted
             let rows = hero.standings
             let limit = showAllStandings ? rows.count : (wide ? 20 : 12)
-            barChart(rows.prefix(8).map { ("\($0.ranking + 1). \($0.player.name)", $0.fortune) },
-                     label: "Fortune", color: UMLeaderboardStyle.fortune)
             HStack(spacing: 10) {
                 Text("#").frame(width: 32)
                 Text("Player").frame(maxWidth: .infinity, alignment: .leading)
@@ -433,8 +446,6 @@ struct CompetitiveBoard: View {
             Text("No prestige has been paid this season yet.").font(.footnote).foregroundStyle(UMTheme.muted)
         } else {
             let limit = showAllStandings ? rows.count : (wide ? 20 : 12)
-            barChart(rows.prefix(8).map { ("\($0.ranking + 1). \($0.player.name)", $0.prestige) },
-                     label: "Prestige", color: UMLeaderboardStyle.prestige)
             HStack(spacing: 10) {
                 Text("#").frame(width: 32)
                 Text("Player").frame(maxWidth: .infinity, alignment: .leading)
@@ -479,7 +490,7 @@ struct CompetitiveBoard: View {
     private func showAllButton(total: Int, limit: Int) -> some View {
         if total > limit || showAllStandings {
             Button(showAllStandings ? "Show fewer" : "Show all \(total)") {
-                withAnimation { showAllStandings.toggle() }
+                withTransaction(Transaction(animation: nil)) { showAllStandings.toggle() }
             }
             .font(.subheadline.weight(.semibold))
             .frame(maxWidth: .infinity)
@@ -495,7 +506,7 @@ struct CompetitiveBoard: View {
             UMLeaderboardCard(title: nil) {
                 ForEach(seasons) { s in
                     let top = s.number == seasonNo ? seasonRows : (allSeasonTop[s.number] ?? [])
-                    Button { seasonNo = s.number } label: {
+                    Button { withTransaction(Transaction(animation: nil)) { seasonNo = s.number } } label: {
                         HStack(alignment: .center, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Season \(s.number)").font(.subheadline.weight(.bold)).foregroundStyle(.white)

@@ -296,6 +296,13 @@ extension UMCompetitive {
         return places.map { r in UMPodiumPlace(ranking: r, entries: top.filter { $0.ranking == r }) }
     }
 
+    /// Whether a round gets a Round standings view (toggle, table, expandable card). Only while
+    /// its games still exist; otherwise the page shows season standings alone.
+    static func hasRoundStandings(_ d: UMRoundDetail?) -> Bool {
+        guard let d else { return false }
+        return !d.detailExpired && !d.standings.isEmpty
+    }
+
     /// A round's per-game detail is gone when the API returned no completions, or once its games
     /// are past the 30-day retention (then only some might survive, so none are trusted).
     static func roundDetailExpired(completions: Int, dateCompleted: String?, now: Date) -> Bool {

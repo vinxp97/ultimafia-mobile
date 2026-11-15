@@ -225,6 +225,9 @@ struct LeaderboardTests {
         let empty = json.replacingOccurrences(of: #""gameCompletions":[{"game""#, with: #""gameCompletionsX":[{"game""#)
         let expired = UMCompetitiveParse.roundInfo(Data(empty.utf8), now: now)
         check(expired?.detailExpired == true, "no completions -> expired")
+        check(UMCompetitive.hasRoundStandings(d), "live round with games offers Round standings")
+        check(!UMCompetitive.hasRoundStandings(expired), "expired round: Season only, no Round option")
+        check(!UMCompetitive.hasRoundStandings(nil), "not loaded yet: no Round option")
         equal(expired?.standings.count, 0, "expired round drops its partial table")
         check(UMCompetitiveParse.roundInfo(Data(#"{"seasonNumber":null,"round":null,"standings":[]}"#.utf8), now: now) == nil, "offseason")
     }
