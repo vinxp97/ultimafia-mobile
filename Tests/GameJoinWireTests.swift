@@ -29,6 +29,15 @@ struct GameJoinWireTests {
         // Review never sends a spectate join.
         check(GameJoinWire.joinPayload(gameId: "g1", spectate: true, isReview: true)["spectate"] as? Bool == false, "review")
 
+        // App Attest rides along with spectate (merge of push-appattest + lobby-watch-spectate).
+        check(join["appAttest"] == nil, "no appAttest key when none produced")
+        let attested = GameJoinWire.joinPayload(gameId: "g1", spectate: true, appAttest: ["keyId": "k", "assertion": "a"])
+        check(attested["spectate"] as? Bool == true, "attested Watch keeps spectate:true")
+        check((attested["appAttest"] as? [String: Any])?["keyId"] as? String == "k", "attested join carries appAttest")
+        let seated = GameJoinWire.joinPayload(gameId: "g1", spectate: false, appAttest: ["devBypass": true])
+        check(seated["spectate"] as? Bool == false, "attested Join keeps spectate:false")
+        check((seated["appAttest"] as? [String: Any])?["devBypass"] as? Bool == true, "devBypass field passes through")
+
         // Watch never maps to takeSeat (switchRole toSpectator:false), whatever session is open.
         let states: [GameEntryState?] = [
             nil,

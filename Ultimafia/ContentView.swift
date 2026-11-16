@@ -69,6 +69,15 @@ struct ContentView: View {
             UMNotifyMaster.launch()
             await app.bootstrap()
         }
+        // Universal links (applinks:ultimafia.com) and any other URL the system hands the app.
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            if let url = activity.webpageURL, let link = UMDeepLink.from(url: url) {
+                UMDeepLinkInbox.shared.post(link)
+            }
+        }
+        .onOpenURL { url in
+            if let link = UMDeepLink.from(url: url) { UMDeepLinkInbox.shared.post(link) }
+        }
         .task {
             await RoleCatalog.shared.load()
         }
@@ -122,6 +131,7 @@ struct MainTabs: View {
                 UMChatStore.shared.start(selfId: app.user?.id)
                 UMPush.signedIn = true
                 UMPush.registerIfConfigured()
+                UMInboxBadge.refresh()
             }
             .onChange(of: inGame) { _, now in
                 UMChatStore.shared.inGame = now
@@ -129,6 +139,12 @@ struct MainTabs: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .umOpenMessages)) { _ in
                 if !inGame { app.section = .messages }
+            }
+            // Notification taps / universal links, including ones that arrived before sign-in finished.
+            .task { drainDeepLink() }
+            .onChange(of: UMDeepLinkInbox.shared.pending) { _, _ in drainDeepLink() }
+            .sheet(item: browserItem) { item in
+                UMInAppBrowser(url: item.url, shareSiteSession: true) { UMDeepLinkInbox.shared.browserURL = nil }
             }
             // Signed-in shell settled: warm Z's profile (credits link) at low priority.
             .task {
@@ -165,6 +181,21 @@ struct MainTabs: View {
         } message: {
             Text(app.alertMessage ?? "")
         }
+    }
+
+    private func drainDeepLink() {
+        guard let link = UMDeepLinkInbox.shared.pending else { return }
+        UMDeepLinkInbox.shared.pending = nil
+        var t = Transaction(animation: nil)
+        t.disablesAnimations = true
+        withTransaction(t) { app.route(link) }
+    }
+
+    private var browserItem: Binding<UMBrowserItem?> {
+        Binding(
+            get: { UMDeepLinkInbox.shared.browserURL.map { UMBrowserItem(url: $0) } },
+            set: { if $0 == nil { UMDeepLinkInbox.shared.browserURL = nil } }
+        )
     }
 
     /// A refused action is reported once, wherever the user is in the shell.

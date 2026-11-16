@@ -1995,6 +1995,9 @@ private struct GameTownPane: View {
                                          name: spectator.name, size: dim(24, 18, 32), square: spectator.squareAvatar)
                             PlayerNameView(player: spectator, fontSize: dim(14, 12, 16), dead: false)
                                 .lineLimit(1)
+                            if UMPlayerClient.showsAppleBadge(client: spectator.client, anonymousGame: session.anonymousGame) {
+                                UMIOSClientBadge(size: dim(12, 10, 13))
+                            }
                             if spectator.id == session.selfId {
                                 Text("(you)")
                                     .font(.system(size: dim(13, 11, 14)))
@@ -2083,9 +2086,14 @@ private struct GameTownPane: View {
                 }
             VStack(alignment: .leading, spacing: dim(2, 0, 2)) {
                 // Graveyard keeps custom name colors (dead-red is for chat lines only).
-                PlayerNameView(player: player, fontSize: dim(16, 13, 17))
-                    .lineLimit(1)
-                    .opacity(dead && session.currentPhaseId != -2 ? 0.7 : 1)
+                HStack(spacing: 4) {
+                    PlayerNameView(player: player, fontSize: dim(16, 13, 17))
+                        .lineLimit(1)
+                    if UMPlayerClient.showsAppleBadge(client: player.client, anonymousGame: session.anonymousGame) {
+                        UMIOSClientBadge(size: dim(13, 11, 14))
+                    }
+                }
+                .opacity(dead && session.currentPhaseId != -2 ? 0.7 : 1)
                 if player.id == session.selfId {
                     HStack(spacing: 6) {
                         Text("you").font(.caption2).foregroundStyle(UMTheme.muted)
