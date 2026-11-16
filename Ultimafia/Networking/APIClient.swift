@@ -154,9 +154,7 @@ final class APIClient {
     }
 
     func connect(gameId: String, spectate: Bool = false) async throws -> GameConnect {
-        var query: [String: String] = [:]
-        if spectate { query["spectate"] = "true" }
-        return try await get("game/\(gameId)/connect", query: query)
+        try await get("game/\(gameId)/connect", query: GameJoinWire.connectQuery(spectate: spectate))
     }
 
     func leaveGame() async {

@@ -1741,10 +1741,8 @@ final class GameSession {
     private func join() {
         guard !didJoin else { return }
         didJoin = true
-        socket.send("join", object: [
-            "gameId": gameId,
-            "isBot": false,
-        ])
+        // Watch / Spectate: the server seats a pregame joiner unless `join` says spectate.
+        socket.send("join", object: GameJoinWire.joinPayload(gameId: gameId, spectate: spectate, isReview: isReview))
     }
 
     private func ingestHistory(_ data: Any?) {
